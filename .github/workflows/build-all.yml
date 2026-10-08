@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       kernels:
-        description: '内核版本（空格分隔，留空=全部）'
-        required: false
-        default: 'android12-5.10'
+        description: '内核版本'
+        required: true
+        default: 'android12-5.10 android13-5.10 android13-5.15 android14-5.15 android14-6.1 android15-6.6 android16-6.12 android17-6.18'
       kernel_repo:
         description: '内核源码仓库 URL'
-        required: false
+        required: true
         default: 'https://android.googlesource.com/kernel/common'
 
 jobs:
@@ -32,21 +32,21 @@ jobs:
           mkdir -p kernels
           cd kernels
           KERNELS="${{ github.event.inputs.kernels }}"
-          if [ -z "$KERNELS" ]; then
-            KERNELS="android12-5.10"
-          fi
           for v in $KERNELS; do
+            echo "============================================================"
             echo "拉取内核: $v"
+            echo "============================================================"
             git clone --depth=1 -b "$v" \
-              "${{ github.event.inputs.kernel_repo }}" "$v" || true
+              "${{ github.event.inputs.kernel_repo }}" "$v" || echo "  ⚠ $v 拉取失败，跳过"
           done
+          echo ""
+          echo "已拉取的内核目录:"
           ls -la
 
       - name: Prepare build_all.sh
         run: |
-          sed -i 's|^KERNELS_ROOT=.*|KERNELS_ROOT="$GITHUB_WORKSPACE/kernels"|' scripts/build_all.sh
-          sed -i 's|^DRIVER_SRC=.*|DRIVER_SRC="$GITHUB_WORKSPACE/lsdriver"|' scripts/build_all.sh
           chmod +x scripts/build_all.sh
+          head -20 scripts/build_all.sh
 
       - name: Build drivers
         run: |
@@ -57,18 +57,21 @@ jobs:
         if: always()
         run: |
           mkdir -p output
-          find lsdriver/build -type f -name "*.ko" -exec cp {} output/ \; 2>/dev/null || true
+          find modules/build -type f -name "*.ko" -exec cp {} output/ \; 2>/dev/null || true
           find scripts/build_logs -type f -name "*.log" -exec cp {} output/ \; 2>/dev/null || true
-          ls -la output/
-          cd output && zip -r ../drivers.zip . || true
+          echo "============================================================"
+          echo "产物列表:"
+          ls -la output/ || true
+          echo "============================================================"
+          cd output && zip -r ../drivers_all.zip . || true
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gki-drivers
+          name: gki-drivers-all
           path: |
             output/*.ko
             output/*.log
-            drivers.zip
+            drivers_all.zip
           retention-days: 30
