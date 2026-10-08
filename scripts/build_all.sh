@@ -1,12 +1,9 @@
-#!/bin/bash
-
 set -euo pipefail
 
 BUILD_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-# GitHub Actions 环境下的路径（工作流会 sed 替换这两行）
 KERNELS_ROOT="$GITHUB_WORKSPACE/kernels"
-DRIVER_SRC="$GITHUB_WORKSPACE/lsdriver"
+DRIVER_SRC="$GITHUB_WORKSPACE/modules"
 
 # 绕过 CRC 校验的版本
 NO_CRC_VERSIONS=(
@@ -239,14 +236,14 @@ build_kernel() {
     clean_driver_build
 }
 
-# ======================== Legacy 快速模式 ========================
-build_legacy_kernel_fast() {
+# ======================== Legacy 构建 ========================
+build_legacy_kernel() {
     local version="$1"
     local kernel_dir="$KERNELS_ROOT/$version"
-    local log_file="$LOG_DIR/${version}_fast.log"
+    local log_file="$LOG_DIR/${version}.log"
 
     log_title
-    log_step "$version" "编译中 (Legacy 快速模式)"
+    log_step "$version" "编译中 (Legacy)"
 
     if [[ ! -d "$kernel_dir" ]]; then
         log_error "内核目录不存在: $kernel_dir"
@@ -275,36 +272,27 @@ build_legacy_kernel_fast() {
     local FULL_PATH="$legacy_clang/bin:$build_tools:$PATH"
 
     if [[ ! -f "$kernel_config" ]]; then
-        log_warn "未找到内核配置，执行快速准备 (gki_defconfig + modules_prepare)"
-        mkdir -p "$kernel_build_dir"
-
-        log_step "$version" "生成 gki_defconfig"
-        if ! env PATH="$FULL_PATH" \
-            make -C "$kernel_src" O="$kernel_build_dir" \
-                ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-                CROSS_COMPILE=aarch64-linux-gnu- \
-                CONFIG_DEBUG_INFO_BTF_MODULES= \
-                gki_defconfig >>"$log_file" 2>&1; then
-            log_error "gki_defconfig 失败，详情见: $log_file"
-            BUILD_RESULTS+=("$version: gki_defconfig 失败")
+        log_warn "未找到内核配置，开始全量内核编译（耗时较长，日志: $log_file）"
+        if ! BUILD_CONFIG=common/build.config.gki.aarch64 OUT_DIR="$common_out_dir" build/build.sh >>"$log_file" 2>&1; then
+            log_error "内核编译失败，详情见: $log_file"
+            BUILD_RESULTS+=("$version: 内核编译失败")
             return
         fi
+    fi
 
-        log_step "$version" "准备模块构建环境 (modules_prepare)"
-        if ! env PATH="$FULL_PATH" \
-            HOSTCFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -I$kernel_dir/prebuilts/kernel-build-tools/linux-x86/include" \
-            HOSTLDFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -L$kernel_dir/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt" \
-            make -C "$kernel_src" O="$kernel_build_dir" \
-                ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-                CONFIG_DEBUG_INFO_BTF_MODULES= \
-                CROSS_COMPILE=aarch64-linux-gnu- \
-                HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
-                modules_prepare >>"$log_file" 2>&1; then
-            log_error "modules_prepare 失败，详情见: $log_file"
-            BUILD_RESULTS+=("$version: modules_prepare 失败")
-            return
-        fi
-        log_info "快速准备完成 (已跳过全量编译)"
+    log_step "$version" "准备模块构建环境"
+    if ! env PATH="$FULL_PATH" \
+        HOSTCFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -I$kernel_dir/prebuilts/kernel-build-tools/linux-x86/include" \
+        HOSTLDFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -L$kernel_dir/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt" \
+    make -C "$kernel_src" O="$kernel_build_dir" \
+        ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+        CONFIG_DEBUG_INFO_BTF_MODULES= \
+        CROSS_COMPILE=aarch64-linux-gnu- \
+        HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
+        modules_prepare >>"$log_file" 2>&1; then
+        log_error "modules_prepare 失败，详情见: $log_file"
+        BUILD_RESULTS+=("$version: modules_prepare 失败")
+        return
     fi
 
     log_step "$version" "编译驱动模块"
@@ -412,7 +400,7 @@ main() {
             fi
             build_kernel "$version" "$clang_path" "aarch64-linux-gnu-" "CLANG_TRIPLE=aarch64-linux-gnu-" || true
         else
-            build_legacy_kernel_fast "$version" || true
+            build_legacy_kernel "$version" || true
         fi
     done
 
