@@ -1,0 +1,74 @@
+name: Build All GKI Drivers
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernels:
+        description: '内核版本（空格分隔，留空=全部）'
+        required: false
+        default: 'android12-5.10'
+      kernel_repo:
+        description: '内核源码仓库 URL'
+        required: false
+        default: 'https://android.googlesource.com/kernel/common'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential gcc gcc-aarch64-linux-gnu \
+            bc bison flex libssl-dev rsync zip git
+
+      - name: Fetch kernel source
+        run: |
+          mkdir -p kernels
+          cd kernels
+          KERNELS="${{ github.event.inputs.kernels }}"
+          if [ -z "$KERNELS" ]; then
+            KERNELS="android12-5.10"
+          fi
+          for v in $KERNELS; do
+            echo "拉取内核: $v"
+            git clone --depth=1 -b "$v" \
+              "${{ github.event.inputs.kernel_repo }}" "$v" || true
+          done
+          ls -la
+
+      - name: Prepare build_all.sh
+        run: |
+          sed -i 's|^KERNELS_ROOT=.*|KERNELS_ROOT="$GITHUB_WORKSPACE/kernels"|' scripts/build_all.sh
+          sed -i 's|^DRIVER_SRC=.*|DRIVER_SRC="$GITHUB_WORKSPACE/lsdriver"|' scripts/build_all.sh
+          chmod +x scripts/build_all.sh
+
+      - name: Build drivers
+        run: |
+          cd scripts
+          ./build_all.sh ${{ github.event.inputs.kernels }}
+
+      - name: Package artifacts
+        if: always()
+        run: |
+          mkdir -p output
+          find lsdriver/build -type f -name "*.ko" -exec cp {} output/ \; 2>/dev/null || true
+          find scripts/build_logs -type f -name "*.log" -exec cp {} output/ \; 2>/dev/null || true
+          ls -la output/
+          cd output && zip -r ../drivers.zip . || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gki-drivers
+          path: |
+            output/*.ko
+            output/*.log
+            drivers.zip
+          retention-days: 30
