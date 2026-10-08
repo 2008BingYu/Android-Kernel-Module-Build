@@ -46,6 +46,7 @@ contains_version() {
 
 find_clang_for_kernel() {
     local kernel_dir="$1"
+    local clang_base="$kernel_dir/prebuilts-master/clang/host/linux-x86"
 
     local config_files=(
         "$kernel_dir/common/build.config.common"
@@ -56,28 +57,42 @@ find_clang_for_kernel() {
     )
 
     local declared_bin=""
+    local declared_ver=""
+
     for cfg in "${config_files[@]}"; do
         if [[ -f "$cfg" ]]; then
-            declared_bin=$(grep -E '^CLANG_PREBUILT_BIN=' "$cfg" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d ' ')
-            [[ -n "$declared_bin" ]] && break
+            if [[ -z "$declared_bin" ]]; then
+                declared_bin=$(grep -E '^CLANG_PREBUILT_BIN=' "$cfg" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d ' ')
+            fi
+            if [[ -z "$declared_ver" ]]; then
+                declared_ver=$(grep -E '^CLANG_VERSION=' "$cfg" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d ' ')
+            fi
         fi
     done
 
-    if [[ -z "$declared_bin" ]]; then
-        return 1
+    if [[ -n "$declared_bin" ]]; then
+        declared_bin="${declared_bin%/bin}"
+        local clang_path
+        if [[ "$declared_bin" == /* ]]; then
+            clang_path="$declared_bin"
+        else
+            clang_path="$kernel_dir/$declared_bin"
+        fi
+        if [[ -x "$clang_path/bin/clang" ]]; then
+            echo "$clang_path"; return 0
+        fi
     fi
 
-    declared_bin="${declared_bin%/bin}"
-
-    local clang_path
-    if [[ "$declared_bin" == /* ]]; then
-        clang_path="$declared_bin"
-    else
-        clang_path="$kernel_dir/$declared_bin"
+    if [[ -n "$declared_ver" && -x "$clang_base/$declared_ver/bin/clang" ]]; then
+        echo "$clang_base/$declared_ver"; return 0
     fi
 
-    if [[ -x "$clang_path/bin/clang" ]]; then
-        echo "$clang_path"; return 0
+    if [[ -d "$clang_base" ]]; then
+        for d in "$clang_base"/clang-*; do
+            if [[ -x "$d/bin/clang" ]]; then
+                echo "$d"; return 0
+            fi
+        done
     fi
 
     return 1
