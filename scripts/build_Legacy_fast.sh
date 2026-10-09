@@ -196,20 +196,20 @@ build_legacy_fast() {
             return
         fi
 
-        log_step "$version" "准备模块构建环境 (modules_prepare)"
-        if ! env PATH="$FULL_PATH" \
-            HOSTCFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -I$kernel_dir/prebuilts/kernel-build-tools/linux-x86/include" \
-            HOSTLDFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -L$kernel_dir/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt" \
-            make -C "$kernel_src" O="$kernel_build_dir" \
-                ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-                CONFIG_DEBUG_INFO_BTF_MODULES= \
-                CROSS_COMPILE=aarch64-linux-gnu- \
-                HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
-                modules_prepare >/dev/null 2>&1; then
-            log_error "modules_prepare 失败"
-            BUILD_RESULTS+=("$version: modules_prepare 失败")
-            return
-        fi
+log_step "$version" "准备模块构建环境 (modules_prepare)"
+if ! env PATH="$FULL_PATH" \
+    HOSTCFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -I$kernel_dir/prebuilts/kernel-build-tools/linux-x86/include" \
+    HOSTLDFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -L$kernel_dir/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt" \
+    make -C "$kernel_src" O="$kernel_build_dir" \
+        ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+        CONFIG_DEBUG_INFO_BTF_MODULES= \
+        CROSS_COMPILE=aarch64-linux-gnu- \
+        HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
+        modules_prepare 2>&1; then
+    log_error "modules_prepare 失败"
+    BUILD_RESULTS+=("$version: modules_prepare 失败")
+    return
+fi
 
         log_info "快速准备完成 (已跳过全量编译)"
     fi
