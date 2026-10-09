@@ -285,8 +285,8 @@ build_legacy_kernel() {
     local build_tools="$kernel_dir/build/build-tools/path/linux-x86"
     local FULL_PATH="$legacy_clang/bin:$build_tools:$PATH"
 
-    local HOST_CFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -I$kernel_dir/prebuilts/kernel-build-tools/linux-x86/include -I/usr/include"
-    local HOST_LDFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -L$kernel_dir/prebuilts/kernel-build-tools/linux-x86/lib64 -L/usr/lib/x86_64-linux-gnu -fuse-ld=lld --rtlib=compiler-rt"
+    local HOST_CFLAGS="-I$kernel_dir/prebuilts/kernel-build-tools/linux-x86/include -I/usr/include"
+    local HOST_LDFLAGS="-L$kernel_dir/prebuilts/kernel-build-tools/linux-x86/lib64 -L/usr/lib/x86_64-linux-gnu -fuse-ld=lld --rtlib=compiler-rt"
 
     if [[ ! -f "$kernel_config" ]]; then
         log_warn "未找到内核配置，开始全量内核编译（耗时较长，日志: $log_file）"
