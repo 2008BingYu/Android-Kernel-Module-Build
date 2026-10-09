@@ -21,7 +21,8 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y build-essential gcc gcc-aarch64-linux-gnu \
-            bc bison flex libssl-dev rsync zip git curl python3
+            bc bison flex libssl-dev libyaml-dev libelf-dev \
+            rsync zip git curl python3
 
       - name: Install repo tool
         run: |
