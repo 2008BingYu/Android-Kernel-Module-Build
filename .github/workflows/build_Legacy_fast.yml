@@ -19,10 +19,23 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt update
-          sudo apt install -y build-essential gcc gcc-aarch64-linux-gnu \
-            bc bison flex libssl-dev libyaml-dev libelf-dev \
+          sudo apt-get update -y
+          sudo apt-get install -y --reinstall \
+            build-essential gcc gcc-aarch64-linux-gnu \
+            bc bison flex libssl-dev libelf-dev \
             rsync zip git curl python3
+          sudo apt-get install -y --reinstall libyaml-0-2 libyaml-dev
+
+      - name: Verify libyaml
+        run: |
+          echo "=== dpkg 检查 ==="
+          dpkg -l | grep -E "libyaml|libelf" || echo "包未安装"
+          echo "=== 头文件检查 ==="
+          ls -la /usr/include/yaml.h || echo "yaml.h 不存在"
+          echo "=== pkg-config 检查 ==="
+          pkg-config --cflags yaml-0.1 || echo "pkg-config 找不到 yaml-0.1"
+          echo "=== 查找 yaml.h 所有位置 ==="
+          find / -name "yaml.h" 2>/dev/null || echo "全盘没找到 yaml.h"
 
       - name: Install repo tool
         run: |
