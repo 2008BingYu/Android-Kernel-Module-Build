@@ -7,15 +7,11 @@ on:
         description: '内核版本'
         required: true
         default: 'android12-5.10 android13-5.10 android13-5.15 android14-5.15 android14-6.1 android15-6.6 android16-6.12 android17-6.18'
-      kernel_repo:
-        description: '内核源码仓库 URL'
-        required: true
-        default: 'https://android.googlesource.com/kernel/common'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 720
 
     steps:
       - name: Checkout repo
@@ -25,20 +21,43 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y build-essential gcc gcc-aarch64-linux-gnu \
-            bc bison flex libssl-dev rsync zip git
+            bc bison flex libssl-dev rsync zip git curl python3
 
-      - name: Fetch kernel source
+      - name: Install repo tool
+        run: |
+          mkdir -p ~/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
+
+      - name: Fetch kernel source (repo)
         run: |
           mkdir -p kernels
           cd kernels
+
           KERNELS="${{ github.event.inputs.kernels }}"
           for v in $KERNELS; do
             echo "============================================================"
-            echo "拉取内核: $v"
+            echo "拉取内核: $v  (repo init -b common-$v)"
             echo "============================================================"
-            git clone --depth=1 -b "$v" \
-              "${{ github.event.inputs.kernel_repo }}" "$v" || echo "  ⚠ $v 拉取失败，跳过"
+
+            mkdir -p "$v"
+            cd "$v"
+
+            repo init -u https://android.googlesource.com/kernel/manifest \
+              -b "common-$v" --depth=1 || { echo "  ⚠ $v repo init 失败，跳过"; cd ..; continue; }
+
+            repo sync -c -j$(nproc) --no-tags --no-clone-bundle \
+              || { echo "  ⚠ $v repo sync 失败，跳过"; cd ..; continue; }
+
+            cd ..
           done
+
           echo ""
           echo "已拉取的内核目录:"
           ls -la
