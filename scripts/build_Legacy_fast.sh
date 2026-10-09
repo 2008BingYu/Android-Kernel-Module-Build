@@ -5,7 +5,6 @@ BUILD_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 KERNELS_ROOT="$GITHUB_WORKSPACE/kernels"
 DRIVER_SRC="$GITHUB_WORKSPACE/modules"
 
-# 需要绕过 CRC 的版本
 NO_CRC_VERSIONS=(
     "android12-5.10"
     "android13-5.10"
@@ -179,6 +178,9 @@ build_legacy_fast() {
     local build_tools="$kernel_dir/build/build-tools/path/linux-x86"
     local FULL_PATH="$legacy_clang/bin:$build_tools:$PATH"
 
+    local HOST_CFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -I$kernel_dir/prebuilts/kernel-build-tools/linux-x86/include -I/usr/include"
+    local HOST_LDFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -L$kernel_dir/prebuilts/kernel-build-tools/linux-x86/lib64 -L/usr/lib/x86_64-linux-gnu -fuse-ld=lld --rtlib=compiler-rt"
+
     if [[ ! -f "$kernel_config" ]]; then
         log_warn "未找到内核配置，执行快速准备 (gki_defconfig + modules_prepare)"
 
@@ -186,30 +188,32 @@ build_legacy_fast() {
 
         log_step "$version" "生成 gki_defconfig"
         if ! env PATH="$FULL_PATH" \
+            HOSTCFLAGS="$HOST_CFLAGS" \
+            HOSTLDFLAGS="$HOST_LDFLAGS" \
             make -C "$kernel_src" O="$kernel_build_dir" \
                 ARCH=arm64 LLVM=1 LLVM_IAS=1 \
                 CROSS_COMPILE=aarch64-linux-gnu- \
                 CONFIG_DEBUG_INFO_BTF_MODULES= \
-                gki_defconfig >/dev/null 2>&1; then
+                gki_defconfig 2>&1; then
             log_error "gki_defconfig 失败"
             BUILD_RESULTS+=("$version: gki_defconfig 失败")
             return
         fi
 
-log_step "$version" "准备模块构建环境 (modules_prepare)"
-if ! env PATH="$FULL_PATH" \
-    HOSTCFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -I$kernel_dir/prebuilts/kernel-build-tools/linux-x86/include" \
-    HOSTLDFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -L$kernel_dir/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt" \
-    make -C "$kernel_src" O="$kernel_build_dir" \
-        ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-        CONFIG_DEBUG_INFO_BTF_MODULES= \
-        CROSS_COMPILE=aarch64-linux-gnu- \
-        HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
-        modules_prepare 2>&1; then
-    log_error "modules_prepare 失败"
-    BUILD_RESULTS+=("$version: modules_prepare 失败")
-    return
-fi
+        log_step "$version" "准备模块构建环境 (modules_prepare)"
+        if ! env PATH="$FULL_PATH" \
+            HOSTCFLAGS="$HOST_CFLAGS" \
+            HOSTLDFLAGS="$HOST_LDFLAGS" \
+            make -C "$kernel_src" O="$kernel_build_dir" \
+                ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+                CONFIG_DEBUG_INFO_BTF_MODULES= \
+                CROSS_COMPILE=aarch64-linux-gnu- \
+                HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
+                modules_prepare 2>&1; then
+            log_error "modules_prepare 失败"
+            BUILD_RESULTS+=("$version: modules_prepare 失败")
+            return
+        fi
 
         log_info "快速准备完成 (已跳过全量编译)"
     fi
@@ -230,22 +234,22 @@ fi
 
     set +e
     env PATH="$FULL_PATH" \
-        HOSTCFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -I$kernel_dir/prebuilts/kernel-build-tools/linux-x86/include" \
-        HOSTLDFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -L$kernel_dir/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt" \
+        HOSTCFLAGS="$HOST_CFLAGS" \
+        HOSTLDFLAGS="$HOST_LDFLAGS" \
     make -C "$kernel_src" O="$kernel_build_dir" \
         M="$DRIVER_SRC" \
         ARCH=arm64 LLVM=1 LLVM_IAS=1 \
         CROSS_COMPILE=aarch64-linux-gnu- \
         HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
         $modpost_warn_param \
-        modules -j"$(nproc)" >/dev/null 2>&1
+        modules -j"$(nproc)" 2>&1
     local make_status=$?
 
     if [[ $make_status -ne 0 ]] && contains_version "$version" "${NO_CRC_VERSIONS[@]}" && fix_empty_ext_modversions; then
         log_warn "检测到空 __version_ext_names，修补后重试"
         env PATH="$FULL_PATH" \
-            HOSTCFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -I$kernel_dir/prebuilts/kernel-build-tools/linux-x86/include" \
-            HOSTLDFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -L$kernel_dir/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt" \
+            HOSTCFLAGS="$HOST_CFLAGS" \
+            HOSTLDFLAGS="$HOST_LDFLAGS" \
         make -C "$kernel_src" O="$kernel_build_dir" \
             M="$DRIVER_SRC" \
             ARCH=arm64 LLVM=1 LLVM_IAS=1 \
@@ -253,7 +257,7 @@ fi
             CROSS_COMPILE=aarch64-linux-gnu- \
             HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
             $modpost_warn_param \
-            modules -j"$(nproc)" >/dev/null 2>&1
+            modules -j"$(nproc)" 2>&1
         make_status=$?
     fi
     set -e
