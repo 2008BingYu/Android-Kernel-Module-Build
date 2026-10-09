@@ -5,7 +5,6 @@ BUILD_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 KERNELS_ROOT="$GITHUB_WORKSPACE/kernels"
 DRIVER_SRC="$GITHUB_WORKSPACE/modules"
 
-# 绕过 CRC 校验的版本
 NO_CRC_VERSIONS=(
     "android12-5.10"
     "android13-5.10"
@@ -286,6 +285,9 @@ build_legacy_kernel() {
     local build_tools="$kernel_dir/build/build-tools/path/linux-x86"
     local FULL_PATH="$legacy_clang/bin:$build_tools:$PATH"
 
+    local HOST_CFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -I$kernel_dir/prebuilts/kernel-build-tools/linux-x86/include -I/usr/include"
+    local HOST_LDFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -L$kernel_dir/prebuilts/kernel-build-tools/linux-x86/lib64 -L/usr/lib/x86_64-linux-gnu -fuse-ld=lld --rtlib=compiler-rt"
+
     if [[ ! -f "$kernel_config" ]]; then
         log_warn "未找到内核配置，开始全量内核编译（耗时较长，日志: $log_file）"
         if ! BUILD_CONFIG=common/build.config.gki.aarch64 OUT_DIR="$common_out_dir" build/build.sh >>"$log_file" 2>&1; then
@@ -297,8 +299,8 @@ build_legacy_kernel() {
 
     log_step "$version" "准备模块构建环境"
     if ! env PATH="$FULL_PATH" \
-        HOSTCFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -I$kernel_dir/prebuilts/kernel-build-tools/linux-x86/include" \
-        HOSTLDFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -L$kernel_dir/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt" \
+        HOSTCFLAGS="$HOST_CFLAGS" \
+        HOSTLDFLAGS="$HOST_LDFLAGS" \
     make -C "$kernel_src" O="$kernel_build_dir" \
         ARCH=arm64 LLVM=1 LLVM_IAS=1 \
         CONFIG_DEBUG_INFO_BTF_MODULES= \
@@ -325,8 +327,8 @@ build_legacy_kernel() {
 
     set +e
     env PATH="$FULL_PATH" \
-        HOSTCFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -I$kernel_dir/prebuilts/kernel-build-tools/linux-x86/include" \
-        HOSTLDFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -L$kernel_dir/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt" \
+        HOSTCFLAGS="$HOST_CFLAGS" \
+        HOSTLDFLAGS="$HOST_LDFLAGS" \
     make -C "$kernel_src" O="$kernel_build_dir" \
         M="$DRIVER_SRC" \
         ARCH=arm64 LLVM=1 LLVM_IAS=1 \
@@ -339,8 +341,8 @@ build_legacy_kernel() {
     if [[ $make_status -ne 0 ]] && contains_version "$version" "${NO_CRC_VERSIONS[@]}" && fix_empty_ext_modversions; then
         log_warn "检测到空 __version_ext_names，修补后重试"
         env PATH="$FULL_PATH" \
-            HOSTCFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -I$kernel_dir/prebuilts/kernel-build-tools/linux-x86/include" \
-            HOSTLDFLAGS="--sysroot=$kernel_dir/build/build-tools/sysroot -L$kernel_dir/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt" \
+            HOSTCFLAGS="$HOST_CFLAGS" \
+            HOSTLDFLAGS="$HOST_LDFLAGS" \
         make -C "$kernel_src" O="$kernel_build_dir" \
             M="$DRIVER_SRC" \
             ARCH=arm64 LLVM=1 LLVM_IAS=1 \
