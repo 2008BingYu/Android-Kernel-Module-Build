@@ -1,0 +1,97 @@
+name: Build Legacy Fast Drivers
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernels:
+        description: '内核版本'
+        required: true
+        default: 'android12-5.10 android13-5.10'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential gcc gcc-aarch64-linux-gnu \
+            bc bison flex libssl-dev libyaml-dev libelf-dev \
+            rsync zip git curl python3
+
+      - name: Install repo tool
+        run: |
+          mkdir -p ~/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
+
+      - name: Fetch kernel source (repo)
+        run: |
+          mkdir -p kernels
+          cd kernels
+
+          KERNELS="${{ github.event.inputs.kernels }}"
+          for v in $KERNELS; do
+            echo "============================================================"
+            echo "拉取内核: $v  (repo init -b common-$v)"
+            echo "============================================================"
+
+            mkdir -p "$v"
+            cd "$v"
+
+            repo init -u https://android.googlesource.com/kernel/manifest \
+              -b "common-$v" --depth=1 || { echo "  ⚠ $v repo init 失败，跳过"; cd ..; continue; }
+
+            repo sync -c -j$(nproc) --no-tags --no-clone-bundle \
+              || { echo "  ⚠ $v repo sync 失败，跳过"; cd ..; continue; }
+
+            cd ..
+          done
+
+          echo ""
+          echo "已拉取的内核目录:"
+          ls -la
+
+      - name: Prepare build_Legacy_fast.sh
+        run: |
+          chmod +x scripts/build_Legacy_fast.sh
+          head -20 scripts/build_Legacy_fast.sh
+
+      - name: Build drivers (Legacy Fast)
+        run: |
+          cd scripts
+          ./build_Legacy_fast.sh ${{ github.event.inputs.kernels }}
+
+      - name: Package artifacts
+        if: always()
+        run: |
+          mkdir -p output
+          find modules/build -type f -name "*.ko" -exec cp {} output/ \; 2>/dev/null || true
+          find scripts/build_logs -type f -name "*.log" -exec cp {} output/ \; 2>/dev/null || true
+          echo "============================================================"
+          echo "产物列表:"
+          ls -la output/ || true
+          echo "============================================================"
+          cd output && zip -r ../drivers_legacy.zip . || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gki-drivers-legacy
+          path: |
+            output/*.ko
+            output/*.log
+            drivers_legacy.zip
+          retention-days: 30
