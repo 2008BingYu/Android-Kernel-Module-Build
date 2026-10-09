@@ -19,10 +19,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt update
-          sudo apt install -y build-essential gcc gcc-aarch64-linux-gnu \
-            bc bison flex libssl-dev libyaml-dev libelf-dev \
+          sudo apt-get update -y
+          sudo apt-get install -y --reinstall \
+            build-essential gcc gcc-aarch64-linux-gnu \
+            bc bison flex libssl-dev libelf-dev \
             rsync zip git curl python3
+          sudo apt-get install -y --reinstall libyaml-0-2 libyaml-dev
 
       - name: Install repo tool
         run: |
@@ -77,11 +79,11 @@ jobs:
         if: always()
         run: |
           mkdir -p output
-          find modules/build -type f -name "*.ko" -exec cp {} output/ \; 2>/dev/null || true
-          find scripts/build_logs -type f -name "*.log" -exec cp {} output/ \; 2>/dev/null || true
+          cp -r modules/build output/ 2>/dev/null || true
+          cp -r scripts/build_logs output/ 2>/dev/null || true
           echo "============================================================"
           echo "产物列表:"
-          ls -la output/ || true
+          find output -type f | sort || true
           echo "============================================================"
           cd output && zip -r ../drivers_legacy.zip . || true
 
@@ -91,7 +93,6 @@ jobs:
         with:
           name: gki-drivers-legacy
           path: |
-            output/*.ko
-            output/*.log
+            output/
             drivers_legacy.zip
           retention-days: 30
