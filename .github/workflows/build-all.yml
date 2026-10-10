@@ -81,7 +81,6 @@ jobs:
         run: |
           mkdir -p output
           cp -r modules/build output/ 2>/dev/null || true
-          cp -r scripts/build_logs output/ 2>/dev/null || true
           echo "产物列表:"
           find output -type f | sort || true
           cd output && zip -r ../drivers_${{ matrix.kernel }}.zip . || true
@@ -91,7 +90,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gki-drivers-${{ matrix.kernel }}
-          path: |
-            output/
-            drivers_${{ matrix.kernel }}.zip
+          path: drivers_${{ matrix.kernel }}.zip
           retention-days: 30
