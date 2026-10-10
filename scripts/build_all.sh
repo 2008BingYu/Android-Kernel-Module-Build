@@ -66,6 +66,22 @@ find_clang_for_kernel() {
         [[ -n "$declared_ver" || -n "$declared_bin" ]] && break
     done
 
+    if [[ -z "$declared_ver" && -z "$declared_bin" ]]; then
+        for scl in \
+            "$kernel_dir/bazel/constants.scl" \
+            "$kernel_dir/common/bazel/constants.scl"; do
+            [[ -f "$scl" ]] || continue
+
+            local scl_ver
+            scl_ver=$(grep -E '^[[:space:]]*CLANG_VERSION[[:space:]]*=' "$scl" 2>/dev/null \
+                      | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d ' ')
+            if [[ -n "$scl_ver" ]]; then
+                declared_ver="$scl_ver"
+                break
+            fi
+        done
+    fi
+
     if [[ -n "$declared_bin" ]]; then
         declared_bin="${declared_bin%/bin}"
         local clang_path
