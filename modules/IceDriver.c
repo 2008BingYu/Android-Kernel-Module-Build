@@ -4,6 +4,7 @@
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/uaccess.h>
+#include <linux/version.h>
 
 #define DEVICE_NAME "IceDriver"
 #define CLASS_NAME  "IceDriver"
@@ -56,7 +57,12 @@ static int __init ice_init(void)
         return -1;
     }
 
-    ice_class = class_create(THIS_MODULE, CLASS_NAME);
+    #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+        ice_class = class_create(CLASS_NAME);
+    #else
+        ice_class = class_create(THIS_MODULE, CLASS_NAME);
+    #endif
+
     if (IS_ERR(ice_class)) {
         cdev_del(&ice_cdev);
         unregister_chrdev_region(ice_dev, 1);
