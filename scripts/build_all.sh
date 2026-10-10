@@ -5,9 +5,6 @@ BUILD_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 KERNELS_ROOT="$GITHUB_WORKSPACE/kernels"
 DRIVER_SRC="$GITHUB_WORKSPACE/modules"
 
-LOG_DIR="$BUILD_ROOT/build_logs"
-mkdir -p "$LOG_DIR"
-
 GREEN='\e[32m'
 RED='\e[31m'
 YELLOW='\e[33m'
@@ -163,10 +160,10 @@ build_kernel() {
     local cross_prefix="$3"
     local extra_params="${4:-}"
     local kernel_dir="$KERNELS_ROOT/$version"
-    local log_file="$LOG_DIR/${version}.log"
 
     log_title
     log_step "$version" "编译中 (Bazel)"
+    log_info "使用 Clang: $clang_path"
 
     if [[ ! -d "$kernel_dir" ]]; then
         log_error "内核目录不存在: $kernel_dir"
@@ -181,9 +178,9 @@ build_kernel() {
     bazel_out=$(readlink -f bazel-bin/common/kernel_aarch64 2>/dev/null || true)
 
     if [[ -z "$bazel_out" || ! -d "$bazel_out" ]]; then
-        log_warn "未检测到内核产物，开始 Bazel 构建 (日志: $log_file)"
-        if ! tools/bazel build //common:kernel_aarch64 //common:kernel_aarch64_modules_prepare >>"$log_file" 2>&1; then
-            log_error "Bazel 构建失败，详情见: $log_file"
+        log_warn "未检测到内核产物，开始 Bazel 构建"
+        if ! tools/bazel build //common:kernel_aarch64 //common:kernel_aarch64_modules_prepare; then
+            log_error "Bazel 构建失败"
             BUILD_RESULTS+=("$version: Bazel 构建失败")
             return
         fi
@@ -192,7 +189,7 @@ build_kernel() {
 
     cd "$bazel_out" || return
     if [[ -f "../kernel_aarch64_modules_prepare/modules_prepare_outdir.tar.gz" ]]; then
-        tar -xzf ../kernel_aarch64_modules_prepare/modules_prepare_outdir.tar.gz >>"$log_file" 2>&1 || true
+        tar -xzf ../kernel_aarch64_modules_prepare/modules_prepare_outdir.tar.gz || true
     fi
 
     cd "$kernel_dir" || return
@@ -201,7 +198,6 @@ build_kernel() {
     local symvers_file="$bazel_out/Module.symvers"
     local symvers_backup=""
 
-    # 所有版本都绕过 CRC
     local modpost_warn_param="KBUILD_MODPOST_WARN=1 CONFIG_EXTENDED_MODVERSIONS=n"
     if [[ -f "$symvers_file" ]]; then
         symvers_backup="$symvers_file.no_crc_bak.$$"
@@ -217,7 +213,7 @@ build_kernel() {
             CONFIG_DEBUG_INFO_BTF_MODULES= \
             CROSS_COMPILE="$cross_prefix" \
             $extra_params $modpost_warn_param \
-            modules -j"$(nproc)" >>"$log_file" 2>&1
+            modules -j"$(nproc)"
     local make_status=$?
 
     if [[ $make_status -ne 0 ]] && fix_empty_ext_modversions; then
@@ -230,7 +226,7 @@ build_kernel() {
                 CONFIG_DEBUG_INFO_BTF_MODULES= \
                 CROSS_COMPILE="$cross_prefix" \
                 $extra_params $modpost_warn_param \
-                modules -j"$(nproc)" >>"$log_file" 2>&1
+                modules -j"$(nproc)"
         make_status=$?
     fi
     set -e
@@ -240,7 +236,7 @@ build_kernel() {
     fi
 
     if [[ $make_status -ne 0 ]]; then
-        log_error "编译失败，详情见: $log_file"
+        log_error "编译失败"
         BUILD_RESULTS+=("$version: 编译失败")
         clean_driver_build
         return
@@ -254,7 +250,6 @@ build_kernel() {
 build_legacy_kernel() {
     local version="$1"
     local kernel_dir="$KERNELS_ROOT/$version"
-    local log_file="$LOG_DIR/${version}.log"
 
     log_title
     log_step "$version" "编译中 (Legacy)"
@@ -282,6 +277,8 @@ build_legacy_kernel() {
         return 1
     fi
 
+    log_info "使用 Clang: $legacy_clang"
+
     local build_tools="$kernel_dir/build/build-tools/path/linux-x86"
     local FULL_PATH="$legacy_clang/bin:$build_tools:$PATH"
 
@@ -289,9 +286,9 @@ build_legacy_kernel() {
     local HOST_LDFLAGS="-L$kernel_dir/prebuilts/kernel-build-tools/linux-x86/lib64 -L/usr/lib/x86_64-linux-gnu -fuse-ld=lld --rtlib=compiler-rt"
 
     if [[ ! -f "$kernel_config" ]]; then
-        log_warn "未找到内核配置，开始全量内核编译（耗时较长，日志: $log_file）"
-        if ! BUILD_CONFIG=common/build.config.gki.aarch64 OUT_DIR="$common_out_dir" build/build.sh >>"$log_file" 2>&1; then
-            log_error "内核编译失败，详情见: $log_file"
+        log_warn "未找到内核配置，开始全量内核编译（耗时较长）"
+        if ! BUILD_CONFIG=common/build.config.gki.aarch64 OUT_DIR="$common_out_dir" build/build.sh; then
+            log_error "内核编译失败"
             BUILD_RESULTS+=("$version: 内核编译失败")
             return
         fi
@@ -306,8 +303,8 @@ build_legacy_kernel() {
         CONFIG_DEBUG_INFO_BTF_MODULES= \
         CROSS_COMPILE=aarch64-linux-gnu- \
         HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
-        modules_prepare >>"$log_file" 2>&1; then
-        log_error "modules_prepare 失败，详情见: $log_file"
+        modules_prepare; then
+        log_error "modules_prepare 失败"
         BUILD_RESULTS+=("$version: modules_prepare 失败")
         return
     fi
@@ -316,7 +313,6 @@ build_legacy_kernel() {
     local symvers_file="$kernel_build_dir/Module.symvers"
     local symvers_backup=""
 
-    # 所有版本都绕过 CRC
     local modpost_warn_param="KBUILD_MODPOST_WARN=1 CONFIG_EXTENDED_MODVERSIONS=n"
     if [[ -f "$symvers_file" ]]; then
         symvers_backup="$symvers_file.no_crc_bak.$$"
@@ -333,7 +329,7 @@ build_legacy_kernel() {
         CROSS_COMPILE=aarch64-linux-gnu- \
         HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
         $modpost_warn_param \
-        modules -j"$(nproc)" >>"$log_file" 2>&1
+        modules -j"$(nproc)"
     local make_status=$?
 
     if [[ $make_status -ne 0 ]] && fix_empty_ext_modversions; then
@@ -348,7 +344,7 @@ build_legacy_kernel() {
             CROSS_COMPILE=aarch64-linux-gnu- \
             HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
             $modpost_warn_param \
-            modules -j"$(nproc)" >>"$log_file" 2>&1
+            modules -j"$(nproc)"
         make_status=$?
     fi
     set -e
@@ -358,7 +354,7 @@ build_legacy_kernel() {
     fi
 
     if [[ $make_status -ne 0 ]]; then
-        log_error "编译失败，详情见: $log_file"
+        log_error "编译失败"
         BUILD_RESULTS+=("$version: 编译失败")
         clean_driver_build
         return
