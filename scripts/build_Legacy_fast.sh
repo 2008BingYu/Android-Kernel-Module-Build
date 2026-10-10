@@ -36,7 +36,11 @@ contains_version() {
 
 find_clang_for_kernel() {
     local kernel_dir="$1"
-    local clang_base="$kernel_dir/prebuilts-master/clang/host/linux-x86"
+
+    local clang_bases=(
+        "$kernel_dir/prebuilts-master/clang/host/linux-x86"
+        "$kernel_dir/prebuilts/clang/host/linux-x86"
+    )
 
     local config_files=(
         "$kernel_dir/common/build.config.common"
@@ -73,17 +77,19 @@ find_clang_for_kernel() {
         fi
     fi
 
-    if [[ -n "$declared_ver" && -x "$clang_base/$declared_ver/bin/clang" ]]; then
-        echo "$clang_base/$declared_ver"; return 0
-    fi
+    for clang_base in "${clang_bases[@]}"; do
+        [[ -d "$clang_base" ]] || continue
 
-    if [[ -d "$clang_base" ]]; then
+        if [[ -n "$declared_ver" && -x "$clang_base/$declared_ver/bin/clang" ]]; then
+            echo "$clang_base/$declared_ver"; return 0
+        fi
+
         for d in "$clang_base"/clang-*; do
             if [[ -x "$d/bin/clang" ]]; then
                 echo "$d"; return 0
             fi
         done
-    fi
+    done
 
     return 1
 }
