@@ -6,12 +6,28 @@ on:
       kernels:
         description: '内核版本'
         required: true
-        default: 'android12-5.10 android13-5.10'
+        default: 'android12-5.10'
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        run: |
+          KERNELS="${{ github.event.inputs.kernels }}"
+          JSON=$(printf '%s\n' $KERNELS | jq -R . | jq -sc .)
+          echo "matrix=$JSON" >> $GITHUB_OUTPUT
+
   build:
+    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel: ${{ fromJson(needs.prepare.outputs.matrix) }}
 
     steps:
       - name: Checkout repo
@@ -42,28 +58,13 @@ jobs:
         run: |
           mkdir -p kernels
           cd kernels
+          v="${{ matrix.kernel }}"
+          echo "拉取内核: $v"
+          mkdir -p "$v" && cd "$v"
 
-          KERNELS="${{ github.event.inputs.kernels }}"
-          for v in $KERNELS; do
-            echo "============================================================"
-            echo "拉取内核: $v  (repo init -b common-$v)"
-            echo "============================================================"
-
-            mkdir -p "$v"
-            cd "$v"
-
-            repo init -u https://android.googlesource.com/kernel/manifest \
-              -b "common-$v" --depth=1 || { echo "  ⚠ $v repo init 失败，跳过"; cd ..; continue; }
-
-            repo sync -c -j$(nproc) --no-tags --no-clone-bundle \
-              || { echo "  ⚠ $v repo sync 失败，跳过"; cd ..; continue; }
-
-            cd ..
-          done
-
-          echo ""
-          echo "已拉取的内核目录:"
-          ls -la
+          repo init -u https://android.googlesource.com/kernel/manifest \
+            -b "common-$v" --depth=1
+          repo sync -c -j$(nproc) --no-tags --no-clone-bundle
 
       - name: Prepare build_Legacy_fast.sh
         run: |
@@ -73,7 +74,7 @@ jobs:
       - name: Build drivers (Legacy Fast)
         run: |
           cd scripts
-          ./build_Legacy_fast.sh ${{ github.event.inputs.kernels }}
+          ./build_Legacy_fast.sh ${{ matrix.kernel }}
 
       - name: Package artifacts
         if: always()
@@ -81,18 +82,16 @@ jobs:
           mkdir -p output
           cp -r modules/build output/ 2>/dev/null || true
           cp -r scripts/build_logs output/ 2>/dev/null || true
-          echo "============================================================"
           echo "产物列表:"
           find output -type f | sort || true
-          echo "============================================================"
-          cd output && zip -r ../drivers_legacy.zip . || true
+          cd output && zip -r ../drivers_legacy_${{ matrix.kernel }}.zip . || true
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gki-drivers-legacy
+          name: gki-drivers-legacy-${{ matrix.kernel }}
           path: |
             output/
-            drivers_legacy.zip
+            drivers_legacy_${{ matrix.kernel }}.zip
           retention-days: 30
