@@ -1,4 +1,4 @@
-set -euo pipefail
+set -uo pipefail
 
 BUILD_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
