@@ -23,7 +23,7 @@ jobs:
   build:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 350
     strategy:
       fail-fast: false
       matrix:
@@ -41,6 +41,10 @@ jobs:
             bc bison flex libssl-dev libelf-dev \
             rsync zip git curl python3
           sudo apt-get install -y --reinstall libyaml-0-2 libyaml-dev
+          sudo apt-get install -y libtinfo5 || {
+            wget http://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2_amd64.deb
+            sudo dpkg -i libtinfo5_6.3-2_amd64.deb || true
+          }
 
       - name: Install repo tool
         run: |
@@ -64,36 +68,40 @@ jobs:
 
           repo init -u https://android.googlesource.com/kernel/manifest \
             -b "common-$v" --depth=1
-          repo sync -c -j$(nproc) --no-tags --no-clone-bundle
+          repo sync -c -j$(nproc) --no-tags --no-clone-bundle --force-sync --optimized-fetch
+
+      - name: Monitor memory before
+        if: always()
+        run: |
+          echo "=== 内存状态 ==="
+          free -h
+          echo "=== CPU 信息 ==="
+          nproc
 
       - name: Prepare build_all.sh
         run: |
           chmod +x scripts/build_all.sh
           head -20 scripts/build_all.sh
-          
-       -name: Monitor memory
-  if: always()
-  run: |
-    echo "=== 内存状态 ==="
-    free -h
-    echo "=== 系统日志中的 OOM ==="
-    dmesg 2>/dev/null | grep -i "oom\|killed process" | tail -20 || echo "  dmesg 需要 root 权限"
-    
+
       - name: Build drivers
         run: |
           cd scripts
           ./build_all.sh ${{ matrix.kernel }}
-     - name: Monitor memory after
-  if: always()
-  run: |
-    echo "=== 结束内存状态 ==="
-    free -h
+
+      - name: Monitor memory after
+        if: always()
+        run: |
+          echo "=== 结束内存状态 ==="
+          free -h
+          echo "=== 系统 OOM 记录 ==="
+          dmesg 2>/dev/null | grep -i "oom\|killed process" | tail -20 || echo "  dmesg 需要 root 权限"
 
       - name: Package artifacts
         if: always()
         run: |
           mkdir -p output
           cp -r modules/build output/ 2>/dev/null || true
+          find kernels -name "jvm.out" -type f -exec cp --parents {} output/ \; 2>/dev/null || true
           echo "产物列表:"
           find output -type f | sort || true
           cd output && zip -r ../drivers_${{ matrix.kernel }}.zip . || true
