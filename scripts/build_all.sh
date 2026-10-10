@@ -51,15 +51,35 @@ find_clang_for_kernel() {
         "$kernel_dir/prebuilts/clang/host/linux-x86"
     )
 
+    local declared_ver=""
+    for cfg in "$kernel_dir/common/build.config.common" \
+               "$kernel_dir/common/build.config.gki.aarch64" \
+               "$kernel_dir/build.config.common" \
+               "$kernel_dir/build.config.gki.aarch64"; do
+        if [[ -f "$cfg" ]]; then
+            declared_ver=$(grep -E '^CLANG_VERSION=' "$cfg" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d ' ')
+            [[ -n "$declared_ver" ]] && break
+        fi
+    done
+
     for base in "${clang_bases[@]}"; do
-        if [[ -d "$base" ]]; then
-            for d in "$base"/clang-*/; do
-                [[ -d "$d" ]] || continue
-                if [[ -x "$d/bin/clang" ]]; then
-                    echo "${d%/}"
-                    return 0
-                fi
-            done
+        [[ -d "$base" ]] || continue
+
+        if [[ -n "$declared_ver" && -x "$base/$declared_ver/bin/clang" ]]; then
+            echo "$base/$declared_ver"
+            return 0
+        fi
+
+        local best=""
+        for d in "$base"/clang-*/; do
+            [[ -d "$d" ]] || continue
+            if [[ -x "$d/bin/clang" ]]; then
+                best="${d%/}"
+            fi
+        done
+        if [[ -n "$best" ]]; then
+            echo "$best"
+            return 0
         fi
     done
 
