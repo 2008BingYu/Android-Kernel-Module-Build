@@ -51,36 +51,53 @@ find_clang_for_kernel() {
         "$kernel_dir/prebuilts/clang/host/linux-x86"
     )
 
+    local config_files=(
+        "$kernel_dir/common/build.config.common"
+        "$kernel_dir/common/build.config.gki.aarch64"
+        "$kernel_dir/build.config.common"
+        "$kernel_dir/build.config.gki.aarch64"
+        "$kernel_dir/build.config.gki"
+    )
+
+    local declared_bin=""
     local declared_ver=""
-    for cfg in "$kernel_dir/common/build.config.common" \
-               "$kernel_dir/common/build.config.gki.aarch64" \
-               "$kernel_dir/build.config.common" \
-               "$kernel_dir/build.config.gki.aarch64"; do
+
+    for cfg in "${config_files[@]}"; do
         if [[ -f "$cfg" ]]; then
-            declared_ver=$(grep -E '^CLANG_VERSION=' "$cfg" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d ' ')
-            [[ -n "$declared_ver" ]] && break
+            if [[ -z "$declared_bin" ]]; then
+                declared_bin=$(grep -E '^CLANG_PREBUILT_BIN=' "$cfg" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d ' ')
+            fi
+            if [[ -z "$declared_ver" ]]; then
+                declared_ver=$(grep -E '^CLANG_VERSION=' "$cfg" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d ' ')
+            fi
         fi
     done
 
-    for base in "${clang_bases[@]}"; do
-        [[ -d "$base" ]] || continue
+    if [[ -n "$declared_bin" ]]; then
+        declared_bin="${declared_bin%/bin}"
+        local clang_path
+        if [[ "$declared_bin" == /* ]]; then
+            clang_path="$declared_bin"
+        else
+            clang_path="$kernel_dir/$declared_bin"
+        fi
+        if [[ -x "$clang_path/bin/clang" ]]; then
+            echo "$clang_path"; return 0
+        fi
+    fi
 
-        if [[ -n "$declared_ver" && -x "$base/$declared_ver/bin/clang" ]]; then
-            echo "$base/$declared_ver"
-            return 0
+    for clang_base in "${clang_bases[@]}"; do
+        [[ -d "$clang_base" ]] || continue
+
+        if [[ -n "$declared_ver" && -x "$clang_base/$declared_ver/bin/clang" ]]; then
+            echo "$clang_base/$declared_ver"; return 0
         fi
 
-        local best=""
-        for d in "$base"/clang-*/; do
-            [[ -d "$d" ]] || continue
+        for d in "$clang_base"/clang-*; do
             if [[ -x "$d/bin/clang" ]]; then
-                best="${d%/}"
+                echo "$d"; return 0
             fi
         done
-        if [[ -n "$best" ]]; then
-            echo "$best"
-            return 0
-        fi
     done
 
     return 1
