@@ -32,31 +32,38 @@ contains_version() {
 find_clang_for_kernel() {
     local kernel_dir="$1"
 
-    local clang_bases=(
-        "$kernel_dir/prebuilts-master/clang/host/linux-x86"
-        "$kernel_dir/prebuilts/clang/host/linux-x86"
-    )
-
-    local config_files=(
-        "$kernel_dir/common/build.config.common"
-        "$kernel_dir/common/build.config.gki.aarch64"
-        "$kernel_dir/build.config.common"
-        "$kernel_dir/build.config.gki.aarch64"
-        "$kernel_dir/build.config.gki"
-    )
-
-    local declared_bin=""
     local declared_ver=""
+    local declared_bin=""
 
-    for cfg in "${config_files[@]}"; do
-        if [[ -f "$cfg" ]]; then
-            if [[ -z "$declared_bin" ]]; then
-                declared_bin=$(grep -E '^CLANG_PREBUILT_BIN=' "$cfg" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d ' ')
-            fi
-            if [[ -z "$declared_ver" ]]; then
-                declared_ver=$(grep -E '^CLANG_VERSION=' "$cfg" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d ' ')
-            fi
-        fi
+    for cfg in \
+        "$kernel_dir/common/build.config.common" \
+        "$kernel_dir/common/build.config.gki.aarch64" \
+        "$kernel_dir/build.config.common" \
+        "$kernel_dir/build.config.gki.aarch64"; do
+        [[ -f "$cfg" ]] || continue
+
+        local cfg_vars
+        cfg_vars=$(
+            cd "$kernel_dir" 2>/dev/null || cd /
+            env -i \
+                PATH="$PATH" \
+                ROOT_DIR="$kernel_dir" \
+                KERNEL_DIR="common" \
+                bash -c "
+                    set +u +e
+                    source '$cfg' >/dev/null 2>&1 || true
+                    echo \"CLANG_VERSION=\${CLANG_VERSION:-}\"
+                    echo \"CLANG_PREBUILT_BIN=\${CLANG_PREBUILT_BIN:-}\"
+                "
+        )
+
+        local v b
+        v=$(echo "$cfg_vars" | grep '^CLANG_VERSION=' | cut -d= -f2-)
+        b=$(echo "$cfg_vars" | grep '^CLANG_PREBUILT_BIN=' | cut -d= -f2-)
+
+        [[ -n "$v" ]] && declared_ver="$v"
+        [[ -n "$b" ]] && declared_bin="$b"
+        [[ -n "$declared_ver" || -n "$declared_bin" ]] && break
     done
 
     if [[ -n "$declared_bin" ]]; then
@@ -72,18 +79,18 @@ find_clang_for_kernel() {
         fi
     fi
 
+    local clang_bases=(
+        "$kernel_dir/prebuilts-master/clang/host/linux-x86"
+        "$kernel_dir/prebuilts/clang/host/linux-x86"
+    )
     for clang_base in "${clang_bases[@]}"; do
         [[ -d "$clang_base" ]] || continue
-
+        if [[ -n "$declared_ver" && -x "$clang_base/clang-$declared_ver/bin/clang" ]]; then
+            echo "$clang_base/clang-$declared_ver"; return 0
+        fi
         if [[ -n "$declared_ver" && -x "$clang_base/$declared_ver/bin/clang" ]]; then
             echo "$clang_base/$declared_ver"; return 0
         fi
-
-        for d in "$clang_base"/clang-*; do
-            if [[ -x "$d/bin/clang" ]]; then
-                echo "$d"; return 0
-            fi
-        done
     done
 
     return 1
