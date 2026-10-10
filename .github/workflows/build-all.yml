@@ -70,6 +70,34 @@ jobs:
           chmod +x scripts/build_all.sh
           head -20 scripts/build_all.sh
 
+      # ============================================================
+      # 新增：Debug 检查每个内核里有什么
+      # ============================================================
+      - name: Debug kernel content
+        if: always()
+        run: |
+          for d in kernels/*/; do
+            v=$(basename "$d")
+            echo "============================================================"
+            echo "内核: $v"
+            echo "============================================================"
+            echo "--- 顶层目录 ---"
+            ls -la "$d" | head -30
+            echo ""
+            echo "--- prebuilts-master 检查 ---"
+            ls -d "$d/prebuilts-master" 2>/dev/null && ls "$d/prebuilts-master/clang/host/linux-x86/" 2>/dev/null | head -10 || echo "  ✘ prebuilts-master 不存在"
+            echo ""
+            echo "--- prebuilts 检查 ---"
+            ls -d "$d/prebuilts" 2>/dev/null && ls "$d/prebuilts/clang/host/linux-x86/" 2>/dev/null | head -10 || echo "  ✘ prebuilts 不存在"
+            echo ""
+            echo "--- build.config.common 里的 clang 字段 ---"
+            grep -i "clang" "$d/common/build.config.common" 2>/dev/null || echo "  ✘ 没有 clang 字段"
+            echo ""
+            echo "--- 查找 clang 可执行文件 ---"
+            find "$d" -path "*/bin/clang" -type f 2>/dev/null | head -5 || echo "  ✘ 没找到"
+            echo ""
+          done
+
       - name: Build drivers
         run: |
           cd scripts
