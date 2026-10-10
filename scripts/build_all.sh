@@ -1,4 +1,4 @@
-set -uo pipefail
+set -euo pipefail
 
 BUILD_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -180,7 +180,7 @@ build_kernel() {
 
     if [[ -z "$bazel_out" || ! -d "$bazel_out" ]]; then
         log_warn "未检测到内核产物，开始 Bazel 构建 (日志: $log_file)"
-        if ! tools/bazel build //common:kernel_aarch64 //common:kernel_aarch64_modules_prepare >>"$log_file" 2>&1; then
+        if ! tools/bazel build //common:kernel_aarch64 //common:kernel_aarch64_modules_prepare 2>&1 | tee -a "$log_file"; then
             log_error "Bazel 构建失败，详情见: $log_file"
             BUILD_RESULTS+=("$version: Bazel 构建失败")
             return
@@ -190,7 +190,7 @@ build_kernel() {
 
     cd "$bazel_out" || return
     if [[ -f "../kernel_aarch64_modules_prepare/modules_prepare_outdir.tar.gz" ]]; then
-        tar -xzf ../kernel_aarch64_modules_prepare/modules_prepare_outdir.tar.gz >>"$log_file" 2>&1 || true
+        tar -xzf ../kernel_aarch64_modules_prepare/modules_prepare_outdir.tar.gz 2>&1 | tee -a "$log_file" || true
     fi
 
     cd "$kernel_dir" || return
@@ -217,8 +217,8 @@ build_kernel() {
             CONFIG_DEBUG_INFO_BTF_MODULES= \
             CROSS_COMPILE="$cross_prefix" \
             $extra_params $modpost_warn_param \
-            modules -j"$(nproc)" >>"$log_file" 2>&1
-    local make_status=$?
+            modules -j"$(nproc)" 2>&1 | tee -a "$log_file"
+    local make_status=${PIPESTATUS[0]}
 
     if [[ $make_status -ne 0 ]] && contains_version "$version" "${NO_CRC_VERSIONS[@]}" && fix_empty_ext_modversions; then
         log_warn "检测到空 __version_ext_names，修补后重试"
@@ -230,8 +230,8 @@ build_kernel() {
                 CONFIG_DEBUG_INFO_BTF_MODULES= \
                 CROSS_COMPILE="$cross_prefix" \
                 $extra_params $modpost_warn_param \
-                modules -j"$(nproc)" >>"$log_file" 2>&1
-        make_status=$?
+                modules -j"$(nproc)" 2>&1 | tee -a "$log_file"
+        make_status=${PIPESTATUS[0]}
     fi
     set -e
 
@@ -290,7 +290,7 @@ build_legacy_kernel() {
 
     if [[ ! -f "$kernel_config" ]]; then
         log_warn "未找到内核配置，开始全量内核编译（耗时较长，日志: $log_file）"
-        if ! BUILD_CONFIG=common/build.config.gki.aarch64 OUT_DIR="$common_out_dir" build/build.sh >>"$log_file" 2>&1; then
+        if ! BUILD_CONFIG=common/build.config.gki.aarch64 OUT_DIR="$common_out_dir" build/build.sh 2>&1 | tee -a "$log_file"; then
             log_error "内核编译失败，详情见: $log_file"
             BUILD_RESULTS+=("$version: 内核编译失败")
             return
@@ -306,7 +306,7 @@ build_legacy_kernel() {
         CONFIG_DEBUG_INFO_BTF_MODULES= \
         CROSS_COMPILE=aarch64-linux-gnu- \
         HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
-        modules_prepare >>"$log_file" 2>&1; then
+        modules_prepare 2>&1 | tee -a "$log_file"; then
         log_error "modules_prepare 失败，详情见: $log_file"
         BUILD_RESULTS+=("$version: modules_prepare 失败")
         return
@@ -335,8 +335,8 @@ build_legacy_kernel() {
         CROSS_COMPILE=aarch64-linux-gnu- \
         HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
         $modpost_warn_param \
-        modules -j"$(nproc)" >>"$log_file" 2>&1
-    local make_status=$?
+        modules -j"$(nproc)" 2>&1 | tee -a "$log_file"
+    local make_status=${PIPESTATUS[0]}
 
     if [[ $make_status -ne 0 ]] && contains_version "$version" "${NO_CRC_VERSIONS[@]}" && fix_empty_ext_modversions; then
         log_warn "检测到空 __version_ext_names，修补后重试"
@@ -350,8 +350,8 @@ build_legacy_kernel() {
             CROSS_COMPILE=aarch64-linux-gnu- \
             HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
             $modpost_warn_param \
-            modules -j"$(nproc)" >>"$log_file" 2>&1
-        make_status=$?
+            modules -j"$(nproc)" 2>&1 | tee -a "$log_file"
+        make_status=${PIPESTATUS[0]}
     fi
     set -e
 
