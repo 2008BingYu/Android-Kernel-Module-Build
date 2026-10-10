@@ -5,17 +5,6 @@ BUILD_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 KERNELS_ROOT="$GITHUB_WORKSPACE/kernels"
 DRIVER_SRC="$GITHUB_WORKSPACE/modules"
 
-NO_CRC_VERSIONS=(
-    "android12-5.10"
-    "android13-5.10"
-    "android13-5.15"
-    "android14-5.15"
-    "android14-6.1"
-    "android15-6.6"
-    "android16-6.12"
-    "android17-6.18"
-)
-
 LOG_DIR="$BUILD_ROOT/build_logs"
 mkdir -p "$LOG_DIR"
 
@@ -204,14 +193,12 @@ build_kernel() {
     log_step "$version" "编译驱动模块"
     local symvers_file="$bazel_out/Module.symvers"
     local symvers_backup=""
-    local modpost_warn_param=""
 
-    if contains_version "$version" "${NO_CRC_VERSIONS[@]}"; then
-        modpost_warn_param="KBUILD_MODPOST_WARN=1 CONFIG_EXTENDED_MODVERSIONS=n"
-        if [[ -f "$symvers_file" ]]; then
-            symvers_backup="$symvers_file.no_crc_bak.$$"
-            mv "$symvers_file" "$symvers_backup"
-        fi
+    # 所有版本都绕过 CRC
+    local modpost_warn_param="KBUILD_MODPOST_WARN=1 CONFIG_EXTENDED_MODVERSIONS=n"
+    if [[ -f "$symvers_file" ]]; then
+        symvers_backup="$symvers_file.no_crc_bak.$$"
+        mv "$symvers_file" "$symvers_backup"
     fi
 
     set +e
@@ -226,7 +213,7 @@ build_kernel() {
             modules -j"$(nproc)" >>"$log_file" 2>&1
     local make_status=$?
 
-    if [[ $make_status -ne 0 ]] && contains_version "$version" "${NO_CRC_VERSIONS[@]}" && fix_empty_ext_modversions; then
+    if [[ $make_status -ne 0 ]] && fix_empty_ext_modversions; then
         log_warn "检测到空 __version_ext_names，修补后重试"
         env PATH="$clang_path/bin:$PATH" \
             make -C "$kernel_dir/common" \
@@ -321,14 +308,12 @@ build_legacy_kernel() {
     log_step "$version" "编译驱动模块"
     local symvers_file="$kernel_build_dir/Module.symvers"
     local symvers_backup=""
-    local modpost_warn_param=""
 
-    if contains_version "$version" "${NO_CRC_VERSIONS[@]}"; then
-        modpost_warn_param="KBUILD_MODPOST_WARN=1 CONFIG_EXTENDED_MODVERSIONS=n"
-        if [[ -f "$symvers_file" ]]; then
-            symvers_backup="$symvers_file.no_crc_bak.$$"
-            mv "$symvers_file" "$symvers_backup"
-        fi
+    # 所有版本都绕过 CRC
+    local modpost_warn_param="KBUILD_MODPOST_WARN=1 CONFIG_EXTENDED_MODVERSIONS=n"
+    if [[ -f "$symvers_file" ]]; then
+        symvers_backup="$symvers_file.no_crc_bak.$$"
+        mv "$symvers_file" "$symvers_backup"
     fi
 
     set +e
@@ -344,7 +329,7 @@ build_legacy_kernel() {
         modules -j"$(nproc)" >>"$log_file" 2>&1
     local make_status=$?
 
-    if [[ $make_status -ne 0 ]] && contains_version "$version" "${NO_CRC_VERSIONS[@]}" && fix_empty_ext_modversions; then
+    if [[ $make_status -ne 0 ]] && fix_empty_ext_modversions; then
         log_warn "检测到空 __version_ext_names，修补后重试"
         env PATH="$FULL_PATH" \
             HOSTCFLAGS="$HOST_CFLAGS" \
