@@ -57,7 +57,7 @@ static int __init ice_init(void)
         return -1;
     }
 
-    #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+    #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
         ice_class = class_create(CLASS_NAME);
     #else
         ice_class = class_create(THIS_MODULE, CLASS_NAME);
