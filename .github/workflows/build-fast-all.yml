@@ -1,4 +1,4 @@
-name: Build Fast GKI Drivers
+name: Build All Fast GKI Drivers
 
 on:
   workflow_dispatch:
