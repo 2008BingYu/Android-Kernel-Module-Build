@@ -134,10 +134,11 @@ fix_empty_ext_modversions() {
 }
 
 clean_driver_build() {
-    if [[ ! -d "$DRIVER_SRC" ]]; then return 1; fi
+    [[ -d "$DRIVER_SRC" ]] || return 0
     find "$DRIVER_SRC" -type f \( \
         -name '*.o' -o -name '*.o.d' -o -name '*.mod' -o -name '*.mod.c' -o \
-        -name '*.order' -o -name '*.symvers' -o -name '*.cmd' -o -name '*.usyms' \
+        -name '*.order' -o -name '*.symvers' -o -name '*.cmd' -o -name '*.usyms' -o \
+        -name '*.lds' -o -name '*.mod.o' -o -name '*.lto.o' -o -name '*.ko.lds' \
     \) -delete 2>/dev/null || true
     find "$DRIVER_SRC" -type d -name '.tmp_versions' -prune -exec rm -rf -- {} + 2>/dev/null || true
 }
