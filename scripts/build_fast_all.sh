@@ -3,9 +3,15 @@
 set -euo pipefail
 
 BUILD_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname -- "$BUILD_ROOT")"
 
-KERNELS_ROOT="$GITHUB_WORKSPACE/kernels"
-DRIVER_SRC="$GITHUB_WORKSPACE/modules"
+if [[ -n "${GITHUB_WORKSPACE:-}" ]]; then
+    KERNELS_ROOT="$GITHUB_WORKSPACE/kernels"
+    DRIVER_SRC="$GITHUB_WORKSPACE/modules"
+else
+    KERNELS_ROOT="$REPO_ROOT/android-kernel"
+    DRIVER_SRC="$REPO_ROOT/modules"
+fi
 
 GREEN='\e[32m'; RED='\e[31m'; YELLOW='\e[33m'
 BLUE='\e[34m'; CYAN='\e[36m'; NC='\e[0m'
