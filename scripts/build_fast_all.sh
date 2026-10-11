@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-KERNELS_ROOT="/home/function/Android-Kernel-Module-Build/android-kernel"
-DRIVER_SRC="/home/function/Android-Kernel-Module-Build/modules"
+KERNELS_ROOT="$GITHUB_WORKSPACE/kernels"
+DRIVER_SRC="$GITHUB_WORKSPACE/modules"
 
 GREEN='\e[32m'; RED='\e[31m'; YELLOW='\e[33m'
 BLUE='\e[34m'; CYAN='\e[36m'; NC='\e[0m'
