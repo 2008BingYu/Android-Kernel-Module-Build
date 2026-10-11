@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+BUILD_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
 KERNELS_ROOT="$GITHUB_WORKSPACE/kernels"
 DRIVER_SRC="$GITHUB_WORKSPACE/modules"
 
