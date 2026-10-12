@@ -3,6 +3,7 @@ obj-m := IceDriver.o
 IceDriver-y := \
     src/core/ice_main.o \
     src/core/ice_ioctl.o \
+    src/core/ice_sym.o \
     src/mem/ice_mem.o \
     src/mem/ice_module.o
 
