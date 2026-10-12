@@ -67,46 +67,59 @@ static int ice_rw_mem_force(struct task_struct *task, unsigned long addr,
                             void *buffer, size_t size, bool write)
 {
     struct mm_struct *mm;
-    size_t done = 0;
-    int ret = 0;
+    size_t done;
+    int ret;
+    unsigned long cur_addr;
+    size_t chunk;
+    pte_t *pte;
+    pte_t old_pte;
+    pte_t new_pte;
+    bool need_restore;
+    struct page *page;
+    void *kaddr;
+    void *target;
 
     mm = get_task_mm(task);
     if (!mm)
         return -EINVAL;
 
+    done = 0;
+    ret = 0;
+
     mmap_read_lock(mm);
 
     while (done < size) {
-        unsigned long cur_addr = addr + done;
-        size_t chunk = PAGE_SIZE - (cur_addr & (PAGE_SIZE - 1));
+        cur_addr = addr + done;
+        chunk = PAGE_SIZE - (cur_addr & (PAGE_SIZE - 1));
         if (chunk > size - done)
             chunk = size - done;
 
-        pte_t *pte = ice_walk_pte(mm, cur_addr);
+        pte = ice_walk_pte(mm, cur_addr);
         if (!pte) {
             ret = -EFAULT;
             break;
         }
 
-        pte_t old_pte = *pte;
-        bool need_restore = false;
+        old_pte = *pte;
+        need_restore = false;
 
         if (write && !pte_write(*pte)) {
-            pte_t new_pte = pte_mkwrite(pte_mkdirty(*pte));
+            new_pte = pte_mkwrite(pte_mkdirty(*pte));
             set_pte_at(mm, cur_addr, pte, new_pte);
             if (p_flush_tlb_mm)
                 p_flush_tlb_mm(mm);
             need_restore = true;
         }
 
-        struct page *page = pte_page(*pte);
+        page = pte_page(*pte);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-        void *kaddr = kmap_local_page(page);
+        kaddr = kmap_local_page(page);
 #else
-        void *kaddr = kmap(page);
+        kaddr = kmap(page);
 #endif
-        void *target = (void *)((unsigned long)kaddr + (cur_addr & (PAGE_SIZE - 1)));
+
+        target = (void *)((unsigned long)kaddr + (cur_addr & (PAGE_SIZE - 1)));
 
         if (write)
             memcpy(target, (char *)buffer + done, chunk);
