@@ -7,6 +7,7 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/pgtable.h>
+#include <asm/pgtable-hwdef.h>
 
 #include "ice_compat.h"
 #include "ice_mem.h"
@@ -103,7 +104,7 @@ static int ice_rw_mem_force(struct task_struct *task, unsigned long addr,
         need_restore = false;
 
         if (write && !pte_write(*pte)) {
-            new_pte = pte_mkwrite(pte_mkdirty(*pte));
+            new_pte = __pte(pte_val(*pte) | PTE_WRITE | PTE_DIRTY);
             set_pte_at(mm, cur_addr, pte, new_pte);
             if (p_flush_tlb_mm)
                 p_flush_tlb_mm(mm);
