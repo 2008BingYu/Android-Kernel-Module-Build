@@ -23,15 +23,16 @@ static void *trampoline_base = NULL;
 static pte_t *trampoline_pte = NULL;
 static pte_t trampoline_orig_pte;
 
-static pid_t  cached_pid = 0;
-static struct mm_struct *cached_mm = NULL;
-static unsigned long cached_va_base = 0;
-static unsigned long cached_pa_base = 0;
+static pid_t  s_last_pid = 0;
+static struct mm_struct *s_last_mm = NULL;
+static unsigned long s_last_vpage_base = 0;
+static unsigned long s_last_ppage_base = 0;
 
 int ice_mem_init(void)
 {
     unsigned long vaddr;
     pte_t *ptep;
+    unsigned int level;
 
     if (in_atomic()) {
         pr_err("[IceDriver] atomic context, cannot vmalloc\n");
@@ -48,16 +49,23 @@ int ice_mem_init(void)
 
     vaddr = (unsigned long)trampoline_base;
 
-    if (!p_get_kernel_pte) {
-        pr_err("[IceDriver] get_kernel_pte not available\n");
+    if (!p_lookup_address) {
+        pr_err("[IceDriver] lookup_address not available\n");
         vfree(trampoline_base);
         trampoline_base = NULL;
         return -EFAULT;
     }
 
-    ptep = p_get_kernel_pte(vaddr);
+    ptep = p_lookup_address(vaddr, &level);
     if (!ptep) {
-        pr_err("[IceDriver] get_kernel_pte failed\n");
+        pr_err("[IceDriver] lookup_address failed\n");
+        vfree(trampoline_base);
+        trampoline_base = NULL;
+        return -EFAULT;
+    }
+
+    if (level != 3) {
+        pr_err("[IceDriver] trampoline is huge page, level=%u, unsupported\n", level);
         vfree(trampoline_base);
         trampoline_base = NULL;
         return -EFAULT;
@@ -66,26 +74,33 @@ int ice_mem_init(void)
     trampoline_pte = ptep;
     trampoline_orig_pte = *ptep;
 
-    pr_info("[IceDriver] trampoline: va=%px pte=%px\n",
-            trampoline_base, trampoline_pte);
+    pr_info("[IceDriver] trampoline: va=%px pte=%px level=%u\n",
+            trampoline_base, trampoline_pte, level);
     return 0;
 }
 
 void ice_mem_exit(void)
 {
     if (trampoline_base) {
+        if (trampoline_pte) {
+            set_pte(trampoline_pte, trampoline_orig_pte);
+            if (p_flush_tlb_kernel_range) {
+                p_flush_tlb_kernel_range((unsigned long)trampoline_base,
+                                         (unsigned long)trampoline_base + PAGE_SIZE);
+            }
+        }
         vfree(trampoline_base);
         trampoline_base = NULL;
         trampoline_pte = NULL;
     }
 
-    if (cached_mm) {
-        mmput(cached_mm);
-        cached_mm = NULL;
+    if (s_last_mm) {
+        mmput(s_last_mm);
+        s_last_mm = NULL;
     }
-    cached_pid = 0;
-    cached_va_base = 0;
-    cached_pa_base = 0;
+    s_last_pid = 0;
+    s_last_vpage_base = 0;
+    s_last_ppage_base = 0;
 }
 
 static int ice_walk_translate_va_to_pa(struct mm_struct *mm, uint64_t vaddr,
@@ -158,18 +173,28 @@ done:
 
 static int ice_trampoline_map(phys_addr_t paddr, void **mapped)
 {
-    unsigned long pfn = __phys_to_pfn(paddr);
-    unsigned long offset = paddr & ~PAGE_MASK;
+    unsigned long pfn;
+    unsigned long offset;
     pte_t new_pte;
+    unsigned long pfn_shift;
 
     if (!trampoline_pte || !trampoline_base)
         return -EINVAL;
 
+    pfn = __phys_to_pfn(paddr);
     if (!pfn_valid(pfn))
         return -EFAULT;
 
+    offset = paddr & ~PAGE_MASK;
+
+#if defined(CONFIG_ARM64_PA_BITS_52) && CONFIG_ARM64_PA_BITS_52
+    pfn_shift = 12;
+#else
+    pfn_shift = PAGE_SHIFT;
+#endif
+
     new_pte = __pte((pte_val(trampoline_orig_pte) & ~PAGE_MASK)
-                    | (pfn << PAGE_SHIFT));
+                    | ((unsigned long)pfn << pfn_shift));
 
     set_pte(trampoline_pte, new_pte);
 
@@ -180,17 +205,6 @@ static int ice_trampoline_map(phys_addr_t paddr, void **mapped)
 
     *mapped = (uint8_t *)trampoline_base + offset;
     return 0;
-}
-
-static void ice_trampoline_unmap(void)
-{
-    if (trampoline_pte) {
-        set_pte(trampoline_pte, trampoline_orig_pte);
-        if (p_flush_tlb_kernel_range) {
-            p_flush_tlb_kernel_range((unsigned long)trampoline_base,
-                                     (unsigned long)trampoline_base + PAGE_SIZE);
-        }
-    }
 }
 
 static int ice_rw_mem_force(struct mm_struct *mm, pid_t pid,
@@ -216,6 +230,7 @@ static int ice_rw_mem_force(struct mm_struct *mm, pid_t pid,
         unsigned long page_offset;
         phys_addr_t paddr;
         void *mapped;
+        int hit_cache = 0;
 
         if (bytes_this_page > size - bytes_processed)
             bytes_this_page = size - bytes_processed;
@@ -223,8 +238,9 @@ static int ice_rw_mem_force(struct mm_struct *mm, pid_t pid,
         va_base = current_vaddr & PAGE_MASK;
         page_offset = current_vaddr & ~PAGE_MASK;
 
-        if (cached_mm == mm && cached_va_base == va_base && cached_pid == pid) {
+        if (s_last_mm == mm && s_last_vpage_base == va_base && s_last_pid == pid) {
             mapped = (uint8_t *)trampoline_base + page_offset;
+            hit_cache = 1;
             goto do_io;
         }
 
@@ -236,15 +252,15 @@ static int ice_rw_mem_force(struct mm_struct *mm, pid_t pid,
         if (status != 0)
             goto next;
 
-        cached_pid = pid;
-        cached_va_base = va_base;
-        cached_pa_base = paddr & PAGE_MASK;
+        s_last_pid = pid;
+        s_last_vpage_base = va_base;
+        s_last_ppage_base = paddr & PAGE_MASK;
 
-        if (cached_mm != mm) {
-            if (cached_mm)
-                mmput(cached_mm);
-            cached_mm = mm;
-            mmget(cached_mm);
+        if (s_last_mm != mm) {
+            if (s_last_mm)
+                mmput(s_last_mm);
+            s_last_mm = mm;
+            mmget(s_last_mm);
         }
 
 do_io:

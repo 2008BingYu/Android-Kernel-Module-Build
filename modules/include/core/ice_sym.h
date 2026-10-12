@@ -6,7 +6,7 @@
 #include <linux/dcache.h>
 #include <linux/path.h>
 
-extern pte_t *(*p_get_kernel_pte)(unsigned long addr);
+extern pte_t *(*p_lookup_address)(unsigned long address, unsigned int *level);
 extern void (*p_flush_tlb_kernel_range)(unsigned long start, unsigned long end);
 extern char *(*p_d_path)(const struct path *path, char *buf, int buflen);
 
