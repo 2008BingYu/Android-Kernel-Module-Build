@@ -3,6 +3,7 @@
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/task.h>
+#include <linux/sched/signal.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
@@ -14,7 +15,6 @@
 #include "ice_compat.h"
 #include "ice_mem.h"
 #include "ice_ioctl.h"
-#include "ice_sym.h"
 
 static struct task_struct *ice_mod_find_task(pid_t pid)
 {
@@ -57,10 +57,10 @@ int ice_module_base(MODULE_BASE *mb)
     ICE_FOR_EACH_VMA(vma, mm)
         const char *p;
 
-        if (!vma->vm_file || !p_d_path)
+        if (!vma->vm_file)
             continue;
 
-        p = p_d_path(&vma->vm_file->f_path, path_buf, sizeof(path_buf));
+        p = d_path(&vma->vm_file->f_path, path_buf, sizeof(path_buf));
         if (IS_ERR(p) || !p)
             continue;
 

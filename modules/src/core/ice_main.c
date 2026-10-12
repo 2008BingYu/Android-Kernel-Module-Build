@@ -9,7 +9,6 @@
 #include "ice_compat.h"
 #include "ice_ioctl.h"
 #include "ice_device.h"
-#include "ice_sym.h"
 
 #define DEVICE_NAME "IceDriver"
 #define CLASS_NAME  "IceDriver"
@@ -72,11 +71,6 @@ static struct file_operations fops = {
 
 static int __init ice_init(void)
 {
-    if (ice_sym_init() < 0) {
-        pr_err("[IceDriver] ice_sym_init failed\n");
-        return -1;
-    }
-
     if (alloc_chrdev_region(&ice_dev, 0, 1, DEVICE_NAME) < 0) {
         pr_err("[IceDriver] failed to allocate device number\n");
         return -1;
@@ -115,7 +109,6 @@ static void __exit ice_exit(void)
     class_destroy(ice_class);
     cdev_del(&ice_cdev);
     unregister_chrdev_region(ice_dev, 1);
-    ice_sym_exit();
     pr_info("[IceDriver] unloaded\n");
 }
 

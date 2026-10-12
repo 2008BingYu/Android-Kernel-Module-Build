@@ -3,20 +3,23 @@
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/task.h>
+#include <linux/sched/signal.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/pgtable.h>
-#include <asm/pgtable-hwdef.h>
+#include <asm/pgtable.h>
+#include <asm/pgtable-prot.h>
+#include <asm/memory.h>
 
 #include "ice_compat.h"
 #include "ice_mem.h"
 #include "ice_ioctl.h"
-#include "ice_sym.h"
 
-static struct task_struct *ice_find_task(pid_t pid)
+static struct mm_struct *ice_get_mm_by_pid(pid_t pid)
 {
     struct task_struct *task;
+    struct mm_struct *mm;
 
     rcu_read_lock();
     task = pid_task(find_vpid(pid), PIDTYPE_PID);
@@ -24,151 +27,191 @@ static struct task_struct *ice_find_task(pid_t pid)
         get_task_struct(task);
     rcu_read_unlock();
 
-    return task;
+    if (!task)
+        return NULL;
+
+    mm = get_task_mm(task);
+    put_task_struct(task);
+    return mm;
 }
 
-static pte_t *ice_walk_pte(struct mm_struct *mm, unsigned long addr)
+static int ice_walk_translate_va_to_pa(struct mm_struct *mm, uint64_t vaddr,
+                                       phys_addr_t *paddr)
 {
     pgd_t *pgd;
     p4d_t *p4d;
     pud_t *pud;
     pmd_t *pmd;
-    pte_t *pte;
+    pte_t *ptep;
+    pte_t pte;
+    unsigned long pfn;
+    uint64_t page_mask;
 
-    pgd = pgd_offset(mm, addr);
-    if (pgd_none(*pgd) || pgd_bad(*pgd)) return NULL;
-
-    p4d = p4d_offset(pgd, addr);
-    if (p4d_none(*p4d) || p4d_bad(*p4d)) return NULL;
-
-    pud = pud_offset(p4d, addr);
-    if (pud_none(*pud) || pud_bad(*pud)) return NULL;
-
-    pmd = pmd_offset(pud, addr);
-    if (pmd_none(*pmd)) return NULL;
-
-    if (pmd_trans_huge(*pmd) || pmd_devmap(*pmd))
-        return NULL;
-
-    if (!p_pte_offset_map)
-        return NULL;
-
-    pte = p_pte_offset_map(pmd, addr);
-    if (!pte || !pte_present(*pte)) {
-        if (pte && p_pte_unmap)
-            p_pte_unmap(pte);
-        return NULL;
-    }
-
-    return pte;
-}
-
-static int ice_rw_mem_force(struct task_struct *task, unsigned long addr,
-                            void *buffer, size_t size, bool write)
-{
-    struct mm_struct *mm;
-    size_t done;
-    int ret;
-    unsigned long cur_addr;
-    size_t chunk;
-    pte_t *pte;
-    pte_t old_pte;
-    pte_t new_pte;
-    bool need_restore;
-    struct page *page;
-    void *kaddr;
-    void *target;
-
-    mm = get_task_mm(task);
-    if (!mm)
+    if (!mm || !paddr)
         return -EINVAL;
 
-    done = 0;
-    ret = 0;
+    pgd = pgd_offset(mm, vaddr);
+    if (pgd_none(*pgd) || pgd_bad(*pgd))
+        return -EFAULT;
 
-    mmap_read_lock(mm);
+    p4d = p4d_offset(pgd, vaddr);
+    if (p4d_none(*p4d) || p4d_bad(*p4d))
+        return -EFAULT;
 
-    while (done < size) {
-        cur_addr = addr + done;
-        chunk = PAGE_SIZE - (cur_addr & (PAGE_SIZE - 1));
-        if (chunk > size - done)
-            chunk = size - done;
+    pud = pud_offset(p4d, vaddr);
 
-        pte = ice_walk_pte(mm, cur_addr);
-        if (!pte) {
-            ret = -EFAULT;
-            break;
-        }
-
-        old_pte = *pte;
-        need_restore = false;
-
-        if (write && !pte_write(*pte)) {
-            new_pte = __pte(pte_val(*pte) | PTE_WRITE | PTE_DIRTY);
-            set_pte_at(mm, cur_addr, pte, new_pte);
-            if (p_flush_tlb_mm)
-                p_flush_tlb_mm(mm);
-            need_restore = true;
-        }
-
-        page = pte_page(*pte);
-        kaddr = ICE_KMAP(page);
-        target = (void *)((unsigned long)kaddr + (cur_addr & (PAGE_SIZE - 1)));
-
-        if (write)
-            memcpy(target, (char *)buffer + done, chunk);
-        else
-            memcpy((char *)buffer + done, target, chunk);
-
-        ICE_KUNMAP(kaddr);
-
-        if (need_restore) {
-            set_pte_at(mm, cur_addr, pte, old_pte);
-            if (p_flush_tlb_mm)
-                p_flush_tlb_mm(mm);
-        }
-
-        if (p_pte_unmap)
-            p_pte_unmap(pte);
-
-        done += chunk;
+    if (pud_leaf(*pud)) {
+        pfn = pud_pfn(*pud);
+        page_mask = PUD_MASK;
+        goto done;
     }
 
-    mmap_read_unlock(mm);
-    mmput(mm);
-    return ret;
+    if (pud_none(*pud) || pud_bad(*pud))
+        return -EFAULT;
+
+    pmd = pmd_offset(pud, vaddr);
+
+    if (pmd_leaf(*pmd)) {
+        pfn = pmd_pfn(*pmd);
+        page_mask = PMD_MASK;
+        goto done;
+    }
+
+    if (pmd_none(*pmd) || pmd_bad(*pmd))
+        return -EFAULT;
+
+    ptep = pte_offset_kernel(pmd, vaddr);
+    if (!ptep)
+        return -EFAULT;
+
+    pte = __pte(READ_ONCE(pte_val(*ptep)));
+    if (!pte_present(pte))
+        return -EFAULT;
+
+    pfn = pte_pfn(pte);
+    page_mask = PAGE_MASK;
+
+done:
+    if (!pfn_valid(pfn))
+        return -EFAULT;
+
+    *paddr = ((phys_addr_t)pfn << PAGE_SHIFT) + (vaddr & ~page_mask);
+    return 0;
+}
+
+static int ice_linear_read_physical(phys_addr_t paddr, void *buffer, size_t size)
+{
+    void *kernel_vaddr = phys_to_virt(paddr);
+
+    if (!size || !buffer)
+        return -EINVAL;
+
+    if (size > PAGE_SIZE - (paddr & ~PAGE_MASK))
+        return -EINVAL;
+
+    if (!__is_lm_address(kernel_vaddr))
+        return -EFAULT;
+
+    memcpy(buffer, kernel_vaddr, size);
+    return 0;
+}
+
+static int ice_linear_write_physical(phys_addr_t paddr, const void *buffer, size_t size)
+{
+    void *kernel_vaddr = phys_to_virt(paddr);
+
+    if (!buffer || !size)
+        return -EINVAL;
+
+    if ((paddr & ~PAGE_MASK) + size > PAGE_SIZE)
+        return -EINVAL;
+
+    if (!__is_lm_address(kernel_vaddr))
+        return -EFAULT;
+
+    memcpy(kernel_vaddr, buffer, size);
+    return 0;
+}
+
+static int ice_rw_mem_force(struct mm_struct *mm, unsigned long addr,
+                            void *buffer, size_t size, bool write)
+{
+    uint64_t current_vaddr;
+    size_t bytes_processed;
+    size_t bytes_done;
+    int status;
+
+    if (!buffer || size == 0)
+        return -EINVAL;
+
+    current_vaddr = untagged_addr(addr);
+    bytes_processed = 0;
+    bytes_done = 0;
+    status = 0;
+
+    while (bytes_processed < size) {
+        size_t bytes_this_page = PAGE_SIZE - (current_vaddr & (PAGE_SIZE - 1));
+        phys_addr_t paddr;
+
+        if (bytes_this_page > size - bytes_processed)
+            bytes_this_page = size - bytes_processed;
+
+        status = ice_walk_translate_va_to_pa(mm, current_vaddr, &paddr);
+
+        if (status == 0) {
+            if (write)
+                status = ice_linear_write_physical(paddr,
+                                                   (uint8_t *)buffer + bytes_processed,
+                                                   bytes_this_page);
+            else
+                status = ice_linear_read_physical(paddr,
+                                                  (uint8_t *)buffer + bytes_processed,
+                                                  bytes_this_page);
+        }
+
+        if (status == 0) {
+            bytes_done += bytes_this_page;
+        } else if (!write && size > 8) {
+            memset((uint8_t *)buffer + bytes_processed, 0, bytes_this_page);
+        }
+
+        bytes_processed += bytes_this_page;
+        current_vaddr += bytes_this_page;
+    }
+
+    return (bytes_done == 0) ? status : (int)bytes_done;
 }
 
 int ice_read_mem(COPY_MEMORY *cm)
 {
-    struct task_struct *task;
+    struct mm_struct *mm;
     int ret;
 
     if (!cm || cm->size == 0)
         return -EINVAL;
 
-    task = ice_find_task(cm->pid);
-    if (!task)
+    mm = ice_get_mm_by_pid(cm->pid);
+    if (!mm)
         return -ESRCH;
 
-    ret = ice_rw_mem_force(task, cm->addr, cm->buffer, cm->size, false);
-    put_task_struct(task);
+    ret = ice_rw_mem_force(mm, cm->addr, cm->buffer, cm->size, false);
+    mmput(mm);
     return ret;
 }
 
 int ice_write_mem(COPY_MEMORY *cm)
 {
-    struct task_struct *task;
+    struct mm_struct *mm;
     int ret;
 
     if (!cm || cm->size == 0)
         return -EINVAL;
 
-    task = ice_find_task(cm->pid);
-    if (!task)
+    mm = ice_get_mm_by_pid(cm->pid);
+    if (!mm)
         return -ESRCH;
 
-    ret = ice_rw_mem_force(task, cm->addr, cm->buffer, cm->size, true);
-    put_task_struct(task);
+    ret = ice_rw_mem_force(mm, cm->addr, cm->buffer, cm->size, true);
+    mmput(mm);
     return ret;
 }
