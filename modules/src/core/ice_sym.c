@@ -10,6 +10,7 @@
 pte_t *(*p_lookup_address)(unsigned long address, unsigned int *level) = NULL;
 void (*p_flush_tlb_kernel_range)(unsigned long start, unsigned long end) = NULL;
 char *(*p_d_path)(const struct path *path, char *buf, int buflen) = NULL;
+unsigned long g_swapper_pg_dir = 0;
 
 static unsigned long (*g_kallsyms_lookup_name)(const char *name) = NULL;
 
@@ -34,12 +35,16 @@ static int ice_resolve_symbols(void)
     p_lookup_address         = (void *)g_kallsyms_lookup_name("lookup_address");
     p_flush_tlb_kernel_range = (void *)g_kallsyms_lookup_name("flush_tlb_kernel_range");
     p_d_path                 = (void *)g_kallsyms_lookup_name("d_path");
+    g_swapper_pg_dir         = g_kallsyms_lookup_name("swapper_pg_dir");
 
-    pr_info("[IceDriver] sym: lookup_address=%px flush_tlb_kernel_range=%px d_path=%px\n",
-            p_lookup_address, p_flush_tlb_kernel_range, p_d_path);
+    pr_info("[IceDriver] sym: lookup_address=%px flush_tlb_kernel_range=%px "
+            "d_path=%px swapper_pg_dir=%px\n",
+            p_lookup_address, p_flush_tlb_kernel_range, p_d_path,
+            (void *)g_swapper_pg_dir);
 
-    if (!p_lookup_address)
-        pr_err("[IceDriver] lookup_address not found, mem rw will fail\n");
+    if (!g_swapper_pg_dir)
+        pr_err("[IceDriver] swapper_pg_dir not found, "
+               "pte slot will fallback to lookup_address\n");
 
     return 0;
 }

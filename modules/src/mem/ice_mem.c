@@ -1,106 +1,229 @@
+/*
+ * ice_mem.c — 进程内存读写核心（lsdriver 读写方案原样移植）
+ *
+ * 与 lsdriver/lsdriver/virtual_memory_rw.h 机制一一对应：
+ *   翻译   ：手动走页表 VA->PA（walk_translate_va_to_pa）
+ *   快路径 ：linear map 直读写（phys_to_virt + __is_lm_address）——生产路径，
+ *            用户只读页在内核 linear map 中是 RW，可直接写
+ *   慢路径 ：per-CPU PTE 槽位（alloc_page 占位页 + vmap(PAGE_KERNEL_RO) 拿 VA
+ *            + get_kernel_pte 找末级 PTE + set_pte 改写 + TLBI 刷当前 CPU），
+ *            linear 失败时回退
+ *   符号   ：kprobe 偷 kallsyms_lookup_name 解析 swapper_pg_dir（ice_sym.c）
+ *
+ * 与 lsdriver 原版的差异（均为安全加固，不改机制）：
+ *   1. memcpy 换成 ice_copy_nofault：逐字节 ldrb/strb + 异常表，
+ *      坏地址返回 -EFAULT 不 panic；
+ *   2. linear 失败自动回退 PTE 槽位（原版只走一条）。
+ *
+ * 对外接口完全不变：
+ *   ice_read_mem / ice_write_mem / ice_mem_init / ice_mem_exit，
+ *   返回约定不变（成功返回字节数，失败返回负错误码）。
+ */
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
-#include <linux/sched/task.h>
-#include <linux/sched/signal.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
-#include <linux/uaccess.h>
-#include <linux/pgtable.h>
+#include <linux/percpu.h>
 #include <linux/vmalloc.h>
+#include <linux/uaccess.h>
+#include <linux/preempt.h>
+#include <linux/err.h>
 #include <asm/pgtable.h>
 #include <asm/pgtable-prot.h>
 #include <asm/memory.h>
 #include <asm/barrier.h>
+#include <asm/tlbflush.h>
 
 #include "ice_compat.h"
-#include "ice_mem.h"
 #include "ice_ioctl.h"
+#include "ice_mem.h"
 #include "ice_sym.h"
 
-static void *trampoline_base = NULL;
-static pte_t *trampoline_pte = NULL;
-static pte_t trampoline_orig_pte;
+#define ICE_MAX_RW_SIZE (1024 * 1024)
 
-static pid_t  s_last_pid = 0;
-static struct mm_struct *s_last_mm = NULL;
-static unsigned long s_last_vpage_base = 0;
-static unsigned long s_last_ppage_base = 0;
 
-int ice_mem_init(void)
+#define ICE_ASM_EXTABLE(from, to)                             \
+    "   .pushsection    __ex_table, \"a\"\n"                  \
+    "   .align          3\n"                                  \
+    "   .long           (" #from " - .), (" #to " - .)\n"     \
+    "   .popsection\n"
+
+static inline int ice_copy_nofault(void *dst, const void *src, size_t size)
 {
-    unsigned long vaddr;
-    pte_t *ptep;
-    unsigned int level;
+    unsigned long err = 0;
 
-    if (in_atomic()) {
-        pr_err("[IceDriver] atomic context, cannot vmalloc\n");
+    asm volatile(
+    "1: ldrb   w3, [%[src]], #1\n"
+    "2: strb   w3, [%[dst]], #1\n"
+    "   subs   %[size], %[size], #1\n"
+    "   b.ne   1b\n"
+    "   b      3f\n"
+    "4: mov    %[err], #1\n"
+    "3:\n"
+    ICE_ASM_EXTABLE(1b, 4b)
+    ICE_ASM_EXTABLE(2b, 4b)
+    : [dst] "+r"(dst), [src] "+r"(src), [size] "+r"(size), [err] "+r"(err)
+    : : "w3", "memory");
+
+    return err ? -EFAULT : 0;
+}
+
+
+struct ice_pte_slot {
+    void        *base_address;
+    pte_t       *pte_address;
+    struct page *placeholder_page;
+};
+
+static DEFINE_PER_CPU(struct ice_pte_slot, ice_pte_slots);
+
+static pte_t *ice_get_kernel_pte(uint64_t vaddr)
+{
+    pgd_t *pgd;
+    p4d_t *p4d;
+    pud_t *pud;
+    pmd_t *pmd;
+
+    if (!g_swapper_pg_dir)
+        return NULL;
+
+    pgd = (pgd_t *)g_swapper_pg_dir + pgd_index(vaddr);
+    if (pgd_none(*pgd) || pgd_bad(*pgd))
+        return NULL;
+
+    p4d = p4d_offset(pgd, vaddr);
+    if (p4d_none(*p4d) || p4d_bad(*p4d))
+        return NULL;
+
+    pud = pud_offset(p4d, vaddr);
+    if (pud_bad(*pud))
+        return NULL;
+
+    pmd = pmd_offset(pud, vaddr);
+    if (pmd_bad(*pmd))
+        return NULL;
+
+    return pte_offset_kernel(pmd, vaddr);
+}
+
+static void ice_free_pte_slots(void)
+{
+    int cpu;
+
+    for_each_possible_cpu(cpu) {
+        struct ice_pte_slot *s = per_cpu_ptr(&ice_pte_slots, cpu);
+        if (s->base_address)     vunmap(s->base_address);
+        if (s->placeholder_page) __free_page(s->placeholder_page);
+        memset(s, 0, sizeof(*s));
+    }
+}
+
+static int ice_alloc_pte_slots(void)
+{
+    int cpu;
+
+    if (in_atomic())
         return -EPERM;
+
+    for_each_possible_cpu(cpu) {
+        struct ice_pte_slot *s = per_cpu_ptr(&ice_pte_slots, cpu);
+        uint64_t vaddr;
+        unsigned int level;
+
+        s->placeholder_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+        if (!s->placeholder_page) {
+            ice_free_pte_slots();
+            return -ENOMEM;
+        }
+
+        vaddr = (uint64_t)vmap(&s->placeholder_page, 1, VM_MAP, PAGE_KERNEL_RO);
+        if (!vaddr) {
+            ice_free_pte_slots();
+            return -ENOMEM;
+        }
+
+        s->pte_address = ice_get_kernel_pte(vaddr);
+        if (!s->pte_address && p_lookup_address) {
+            level = 0;
+            s->pte_address = p_lookup_address(vaddr, &level);
+            if (s->pte_address && level != 3)
+                s->pte_address = NULL;
+        }
+        if (!s->pte_address) {
+            pr_err("[IceDriver] slot pte failed, cpu=%d\n", cpu);
+            ice_free_pte_slots();
+            return -EFAULT;
+        }
+
+        s->base_address = (void *)vaddr;
     }
-
-    trampoline_base = vmalloc(PAGE_SIZE);
-    if (!trampoline_base) {
-        pr_err("[IceDriver] vmalloc failed\n");
-        return -ENOMEM;
-    }
-
-    memset(trampoline_base, 0xAA, PAGE_SIZE);
-
-    vaddr = (unsigned long)trampoline_base;
-
-    if (!p_lookup_address) {
-        pr_err("[IceDriver] lookup_address not available\n");
-        vfree(trampoline_base);
-        trampoline_base = NULL;
-        return -EFAULT;
-    }
-
-    ptep = p_lookup_address(vaddr, &level);
-    if (!ptep) {
-        pr_err("[IceDriver] lookup_address failed\n");
-        vfree(trampoline_base);
-        trampoline_base = NULL;
-        return -EFAULT;
-    }
-
-    if (level != 3) {
-        pr_err("[IceDriver] trampoline is huge page, level=%u, unsupported\n", level);
-        vfree(trampoline_base);
-        trampoline_base = NULL;
-        return -EFAULT;
-    }
-
-    trampoline_pte = ptep;
-    trampoline_orig_pte = *ptep;
-
-    pr_info("[IceDriver] trampoline: va=%px pte=%px level=%u\n",
-            trampoline_base, trampoline_pte, level);
     return 0;
 }
 
-void ice_mem_exit(void)
+static inline void ice_flush_tlb_addr_all_asid_current_cpu(uint64_t addr)
 {
-    if (trampoline_base) {
-        if (trampoline_pte) {
-            set_pte(trampoline_pte, trampoline_orig_pte);
-            if (p_flush_tlb_kernel_range) {
-                p_flush_tlb_kernel_range((unsigned long)trampoline_base,
-                                         (unsigned long)trampoline_base + PAGE_SIZE);
-            }
-        }
-        vfree(trampoline_base);
-        trampoline_base = NULL;
-        trampoline_pte = NULL;
-    }
+    uint64_t tlbi_addr = __TLBI_VADDR(addr, 0);
 
-    if (s_last_mm) {
-        mmput(s_last_mm);
-        s_last_mm = NULL;
-    }
-    s_last_pid = 0;
-    s_last_vpage_base = 0;
-    s_last_ppage_base = 0;
+    asm volatile("dsb nshst\n\t"
+                 "tlbi vaale1, %[tlbi_addr]\n\t"
+                 "dsb nsh\n\t"
+                 "isb\n\t"
+                 : : [tlbi_addr] "r"(tlbi_addr) : "memory");
+}
+
+static const uint64_t ICE_PTE_FLAGS = PTE_TYPE_PAGE | PTE_VALID | PTE_AF |
+                                      PTE_SHARED | PTE_PXN | PTE_UXN |
+                                      PTE_ATTRINDX(MT_NORMAL_NC);
+
+static inline void *ice_pte_map_page(phys_addr_t paddr, size_t size)
+{
+    struct ice_pte_slot *s = this_cpu_ptr(&ice_pte_slots);
+    uint64_t pfn = __phys_to_pfn(paddr);
+
+    if (!size)
+        return ERR_PTR(-EINVAL);
+    if (!s->base_address || !s->pte_address)
+        return ERR_PTR(-ENODEV);
+    if (!pfn_valid(pfn))
+        return ERR_PTR(-EFAULT);
+    if (((paddr & ~PAGE_MASK) + size) > PAGE_SIZE)
+        return ERR_PTR(-EINVAL);
+
+    set_pte(s->pte_address, pfn_pte(pfn, __pgprot(ICE_PTE_FLAGS)));
+    ice_flush_tlb_addr_all_asid_current_cpu((uint64_t)s->base_address);
+
+    return (uint8_t *)s->base_address + (paddr & ~PAGE_MASK);
+}
+
+static inline int ice_pte_read_physical(phys_addr_t paddr, void *buffer, size_t size)
+{
+    void *mapped;
+    int status = 0;
+
+    preempt_disable();
+    mapped = ice_pte_map_page(paddr, size);
+    if (IS_ERR(mapped)) status = PTR_ERR(mapped);
+    else                status = ice_copy_nofault(buffer, mapped, size);
+    preempt_enable();
+
+    return status;
+}
+
+static inline int ice_pte_write_physical(phys_addr_t paddr, const void *buffer, size_t size)
+{
+    void *mapped;
+    int status = 0;
+
+    preempt_disable();
+    mapped = ice_pte_map_page(paddr, size);
+    if (IS_ERR(mapped)) status = PTR_ERR(mapped);
+    else                status = ice_copy_nofault(mapped, buffer, size);
+    preempt_enable();
+
+    return status;
 }
 
 static int ice_walk_translate_va_to_pa(struct mm_struct *mm, uint64_t vaddr,
@@ -171,113 +294,34 @@ done:
     return 0;
 }
 
-static int ice_trampoline_map(phys_addr_t paddr, void **mapped)
+static inline int ice_linear_read_physical(phys_addr_t paddr, void *buffer, size_t size)
 {
-    unsigned long pfn;
-    unsigned long offset;
-    pte_t new_pte;
-    unsigned long pfn_shift;
+    void *kernel_vaddr = phys_to_virt(paddr);
 
-    if (!trampoline_pte || !trampoline_base)
+    if (!size || !buffer)
         return -EINVAL;
-
-    pfn = __phys_to_pfn(paddr);
-    if (!pfn_valid(pfn))
+    if (size > PAGE_SIZE - (paddr & ~PAGE_MASK))
+        return -EINVAL;
+    if (!__is_lm_address((unsigned long)kernel_vaddr))
         return -EFAULT;
 
-    offset = paddr & ~PAGE_MASK;
-
-#if defined(CONFIG_ARM64_PA_BITS_52) && CONFIG_ARM64_PA_BITS_52
-    pfn_shift = 12;
-#else
-    pfn_shift = PAGE_SHIFT;
-#endif
-
-    new_pte = __pte((pte_val(trampoline_orig_pte) & ~PAGE_MASK)
-                    | ((unsigned long)pfn << pfn_shift));
-
-    set_pte(trampoline_pte, new_pte);
-
-    if (p_flush_tlb_kernel_range) {
-        p_flush_tlb_kernel_range((unsigned long)trampoline_base,
-                                 (unsigned long)trampoline_base + PAGE_SIZE);
-    }
-
-    *mapped = (uint8_t *)trampoline_base + offset;
-    return 0;
+    return ice_copy_nofault(buffer, kernel_vaddr, size);
 }
 
-static int ice_rw_mem_force(struct mm_struct *mm, pid_t pid,
-                            unsigned long addr, void *buffer,
-                            size_t size, bool write)
+static inline int ice_linear_write_physical(phys_addr_t paddr, const void *buffer, size_t size)
 {
-    uint64_t current_vaddr;
-    size_t bytes_processed;
-    size_t bytes_done;
-    int status;
+    void *kernel_vaddr = phys_to_virt(paddr);
 
-    if (!buffer || size == 0)
+    if (!buffer || !size)
         return -EINVAL;
+    if ((paddr & ~PAGE_MASK) + size > PAGE_SIZE)
+        return -EINVAL;
+    if (!__is_lm_address((unsigned long)kernel_vaddr))
+        return -EFAULT;
 
-    current_vaddr = untagged_addr(addr);
-    bytes_processed = 0;
-    bytes_done = 0;
-    status = 0;
-
-    while (bytes_processed < size) {
-        size_t bytes_this_page = PAGE_SIZE - (current_vaddr & (PAGE_SIZE - 1));
-        unsigned long va_base;
-        unsigned long page_offset;
-        phys_addr_t paddr;
-        void *mapped;
-        int hit_cache = 0;
-
-        if (bytes_this_page > size - bytes_processed)
-            bytes_this_page = size - bytes_processed;
-
-        va_base = current_vaddr & PAGE_MASK;
-        page_offset = current_vaddr & ~PAGE_MASK;
-
-        if (s_last_mm == mm && s_last_vpage_base == va_base && s_last_pid == pid) {
-            mapped = (uint8_t *)trampoline_base + page_offset;
-            hit_cache = 1;
-            goto do_io;
-        }
-
-        status = ice_walk_translate_va_to_pa(mm, current_vaddr, &paddr);
-        if (status != 0)
-            goto next;
-
-        status = ice_trampoline_map(paddr, &mapped);
-        if (status != 0)
-            goto next;
-
-        s_last_pid = pid;
-        s_last_vpage_base = va_base;
-        s_last_ppage_base = paddr & PAGE_MASK;
-
-        if (s_last_mm != mm) {
-            if (s_last_mm)
-                mmput(s_last_mm);
-            s_last_mm = mm;
-            mmget(s_last_mm);
-        }
-
-do_io:
-        if (write)
-            memcpy(mapped, (uint8_t *)buffer + bytes_processed, bytes_this_page);
-        else
-            memcpy((uint8_t *)buffer + bytes_processed, mapped, bytes_this_page);
-
-        bytes_done += bytes_this_page;
-
-next:
-        bytes_processed += bytes_this_page;
-        current_vaddr += bytes_this_page;
-    }
-
-    return (bytes_done == 0) ? status : (int)bytes_done;
+    return ice_copy_nofault(kernel_vaddr, buffer, size);
 }
+
 
 static struct mm_struct *ice_get_mm_by_pid(pid_t pid)
 {
@@ -298,36 +342,138 @@ static struct mm_struct *ice_get_mm_by_pid(pid_t pid)
     return mm;
 }
 
+static int ice_rw_mem_force(struct mm_struct *mm, unsigned long addr,
+                            void *buffer, size_t size, bool write)
+{
+    uint64_t current_vaddr = untagged_addr(addr);
+    size_t bytes_processed = 0;
+    size_t bytes_done = 0;
+    int status = 0;
+
+    if (!buffer || size == 0)
+        return -EINVAL;
+
+    while (bytes_processed < size) {
+        size_t bytes_this_page = PAGE_SIZE - (current_vaddr & (PAGE_SIZE - 1));
+        phys_addr_t paddr;
+
+        if (bytes_this_page > size - bytes_processed)
+            bytes_this_page = size - bytes_processed;
+
+        status = ice_walk_translate_va_to_pa(mm, current_vaddr, &paddr);
+
+        if (status == 0) {
+            if (!write)
+                status = ice_linear_read_physical(paddr,
+                            (uint8_t *)buffer + bytes_processed, bytes_this_page);
+            else
+                status = ice_linear_write_physical(paddr,
+                            (const uint8_t *)buffer + bytes_processed, bytes_this_page);
+
+            if (status != 0) {
+                if (!write)
+                    status = ice_pte_read_physical(paddr,
+                                (uint8_t *)buffer + bytes_processed, bytes_this_page);
+                else
+                    status = ice_pte_write_physical(paddr,
+                                (const uint8_t *)buffer + bytes_processed, bytes_this_page);
+            }
+        }
+
+        if (status == 0) {
+            bytes_done += bytes_this_page;
+        } else if (!write && size > 8) {
+            memset((uint8_t *)buffer + bytes_processed, 0, bytes_this_page);
+        }
+
+        bytes_processed += bytes_this_page;
+        current_vaddr += bytes_this_page;
+    }
+
+    return (bytes_done == 0) ? status : (int)bytes_done;
+}
+
+
 int ice_read_mem(COPY_MEMORY *cm)
 {
     struct mm_struct *mm;
+    void *kbuf;
     int ret;
 
     if (!cm || cm->size == 0)
         return -EINVAL;
+    if (cm->size > ICE_MAX_RW_SIZE)
+        return -EINVAL;
+
+    kbuf = kvmalloc(cm->size, GFP_KERNEL);
+    if (!kbuf)
+        return -ENOMEM;
 
     mm = ice_get_mm_by_pid(cm->pid);
-    if (!mm)
+    if (!mm) {
+        kvfree(kbuf);
         return -ESRCH;
+    }
 
-    ret = ice_rw_mem_force(mm, cm->pid, cm->addr, cm->buffer, cm->size, false);
+    ret = ice_rw_mem_force(mm, cm->addr, kbuf, cm->size, false);
     mmput(mm);
+
+    if (ret > 0 &&
+        copy_to_user((void __user *)cm->buffer, kbuf, ret))
+        ret = -EFAULT;
+
+    kvfree(kbuf);
     return ret;
 }
 
 int ice_write_mem(COPY_MEMORY *cm)
 {
     struct mm_struct *mm;
+    void *kbuf;
     int ret;
 
     if (!cm || cm->size == 0)
         return -EINVAL;
+    if (cm->size > ICE_MAX_RW_SIZE)
+        return -EINVAL;
+
+    kbuf = kvmalloc(cm->size, GFP_KERNEL);
+    if (!kbuf)
+        return -ENOMEM;
+
+    if (copy_from_user(kbuf, (void __user *)cm->buffer, cm->size)) {
+        kvfree(kbuf);
+        return -EFAULT;
+    }
 
     mm = ice_get_mm_by_pid(cm->pid);
-    if (!mm)
+    if (!mm) {
+        kvfree(kbuf);
         return -ESRCH;
+    }
 
-    ret = ice_rw_mem_force(mm, cm->pid, cm->addr, cm->buffer, cm->size, true);
+    ret = ice_rw_mem_force(mm, cm->addr, kbuf, cm->size, true);
     mmput(mm);
+
+    kvfree(kbuf);
     return ret;
+}
+
+int ice_mem_init(void)
+{
+    int ret;
+
+    ret = ice_alloc_pte_slots();
+    if (ret) {
+        pr_err("[IceDriver] pte slot alloc failed: %d\n", ret);
+        return ret;
+    }
+
+    pr_info("[IceDriver] memory core ready (lsdriver scheme)\n");
+    return 0;
+}
+
+void ice_mem_exit(void)
+{
+    ice_free_pte_slots();
 }

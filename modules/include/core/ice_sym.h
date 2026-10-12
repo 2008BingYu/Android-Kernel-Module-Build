@@ -10,6 +10,8 @@ extern pte_t *(*p_lookup_address)(unsigned long address, unsigned int *level);
 extern void (*p_flush_tlb_kernel_range)(unsigned long start, unsigned long end);
 extern char *(*p_d_path)(const struct path *path, char *buf, int buflen);
 
+extern unsigned long g_swapper_pg_dir;
+
 int  ice_sym_init(void);
 void ice_sym_exit(void);
 
