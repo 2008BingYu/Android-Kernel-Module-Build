@@ -18,12 +18,19 @@ static ICE_FILE_CTX *ice_get_ctx(struct file *filep)
 long ice_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 {
     ICE_FILE_CTX *ctx = ice_get_ctx(filep);
+    COPY_MEMORY cm;
+    MODULE_BASE mb;
+    char name_buf[256];
+    char user_key[0x100];
+    unsigned long user_name;
+    int ret;
+
     if (!ctx)
         return -EINVAL;
 
     switch (cmd) {
-    case OP_INIT_KEY: {
-        char user_key[0x100] = {0};
+    case OP_INIT_KEY:
+        memset(user_key, 0, sizeof(user_key));
 
         if (copy_from_user(user_key, (void __user *)arg,
                            sizeof(user_key) - 1))
@@ -37,35 +44,28 @@ long ice_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 
         pr_warn("[IceDriver] bad key\n");
         return -EACCES;
-    }
 
-    case OP_READ_MEM: {
+    case OP_READ_MEM:
         if (!ctx->authorized)
             return -EACCES;
 
-        COPY_MEMORY cm;
         if (copy_from_user(&cm, (void __user *)arg, sizeof(cm)))
             return -EFAULT;
         return ice_read_mem(&cm);
-    }
 
-    case OP_WRITE_MEM: {
+    case OP_WRITE_MEM:
         if (!ctx->authorized)
             return -EACCES;
 
-        COPY_MEMORY cm;
         if (copy_from_user(&cm, (void __user *)arg, sizeof(cm)))
             return -EFAULT;
         return ice_write_mem(&cm);
-    }
 
-    case OP_MODULE_BASE: {
+    case OP_MODULE_BASE:
         if (!ctx->authorized)
             return -EACCES;
 
-        MODULE_BASE mb;
-        char name_buf[256] = {0};
-        unsigned long user_name;
+        memset(name_buf, 0, sizeof(name_buf));
 
         if (copy_from_user(&mb, (void __user *)arg, sizeof(mb)))
             return -EFAULT;
@@ -80,7 +80,7 @@ long ice_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 
         mb.name = name_buf;
 
-        int ret = ice_module_base(&mb);
+        ret = ice_module_base(&mb);
         if (ret < 0)
             return ret;
 
@@ -89,7 +89,6 @@ long ice_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
             return -EFAULT;
 
         return 0;
-    }
 
     default:
         return -EINVAL;
