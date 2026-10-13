@@ -33,6 +33,7 @@ long ice_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
     ICE_FILE_CTX *ctx = ice_get_ctx(filep);
     COPY_MEMORY cm;
     GET_PID gp;
+    GET_POINTER ptr;
     MODULE_BASE mb;
     char name_buf[256];
     char user_key[0x100];
@@ -130,6 +131,26 @@ long ice_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
         if (copy_from_user(&cm, (void __user *)arg, sizeof(cm)))
             return -EFAULT;
         return ice_write_mem(&cm);
+
+    case OP_GET_POINTER:
+        if (!ctx->authorized)
+            return -EACCES;
+
+        if (copy_from_user(&ptr, (void __user *)arg, sizeof(ptr)))
+            return -EFAULT;
+
+        /* 直接复用 ice_read_mem：buffer 指向用户结构体里的
+         * value 字段，读出的指针值由它 copy_to_user 写回 */
+        cm.pid    = ptr.pid;
+        cm.addr   = ptr.addr;
+        cm.buffer = &((GET_POINTER __user *)arg)->value;
+        cm.size   = sizeof(ptr.value);
+
+        ret = ice_read_mem(&cm);
+        if (ret < 0)
+            return ret;
+
+        return 0;
 
     default:
         return -EINVAL;

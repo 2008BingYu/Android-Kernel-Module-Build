@@ -9,6 +9,7 @@
 #define OP_MODULE_BASE  0x802
 #define OP_READ_MEM     0x803
 #define OP_WRITE_MEM    0x804
+#define OP_GET_POINTER  0x805
 
 typedef struct _COPY_MEMORY {
     pid_t     pid;
@@ -21,6 +22,12 @@ typedef struct _GET_PID {
     char     *name;
     pid_t     pid;
 } GET_PID;
+
+typedef struct _GET_POINTER {
+    pid_t      pid;
+    uintptr_t  addr;
+    uintptr_t  value;
+} GET_POINTER;
 
 typedef struct _MODULE_BASE {
     pid_t     pid;
