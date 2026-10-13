@@ -1,58 +1,42 @@
+/*
+ * ice_sym.c — 无符号依赖的内核页表根解析
+ *
+ * 真机实测：register_kprobe 偷 kallsyms_lookup_name 会在 insmod 时
+ * 引发全机瞬间硬挂（stop_machine 文本 patch 路径，无任何日志落盘）。
+ *
+ * 因此不再使用 kprobe / 任何未导出符号：
+ *   - 直接读 TTBR1_EL1 拿内核页表根的物理地址（表基址在 RAM 中，走 linear map 可得 VA）
+ *   - 不受 KASLR 影响（TTBR1 存的是物理地址）
+ *   - 统一解码同时兼容 48 位 PA 与 52 位 PA（LPA）两种布局：
+ *       48 位 PA：TTBR[47:2] = PA[47:2]（PA[5:2] 恒为 0，表基址对齐）
+ *       52 位 PA：TTBR[5:2] = PA[51:48]，TTBR[47:6] = PA[47:6]
+ *     统一公式在 48 位 PA 下 TTBR[5:2]=0，自然退化成立。
+ */
+
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/kprobes.h>
-#include <linux/mm.h>
-#include <linux/dcache.h>
-#include <linux/path.h>
+#include <asm/memory.h>
 
 #include "ice_sym.h"
 
-pte_t *(*p_lookup_address)(unsigned long address, unsigned int *level) = NULL;
-void (*p_flush_tlb_kernel_range)(unsigned long start, unsigned long end) = NULL;
-char *(*p_d_path)(const struct path *path, char *buf, int buflen) = NULL;
 unsigned long g_swapper_pg_dir = 0;
-
-static unsigned long (*g_kallsyms_lookup_name)(const char *name) = NULL;
-
-static int ice_resolve_symbols(void)
-{
-    struct kprobe kp = { .symbol_name = "kallsyms_lookup_name" };
-    int ret;
-
-    ret = register_kprobe(&kp);
-    if (ret < 0) {
-        pr_err("[IceDriver] kprobe register failed: %d\n", ret);
-        return ret;
-    }
-    g_kallsyms_lookup_name = (void *)kp.addr;
-    unregister_kprobe(&kp);
-
-    if (!g_kallsyms_lookup_name) {
-        pr_err("[IceDriver] kallsyms_lookup_name not found\n");
-        return -1;
-    }
-
-    p_lookup_address         = (void *)g_kallsyms_lookup_name("lookup_address");
-    p_flush_tlb_kernel_range = (void *)g_kallsyms_lookup_name("flush_tlb_kernel_range");
-    p_d_path                 = (void *)g_kallsyms_lookup_name("d_path");
-    g_swapper_pg_dir         = g_kallsyms_lookup_name("swapper_pg_dir");
-
-    pr_info("[IceDriver] sym: lookup_address=%px flush_tlb_kernel_range=%px "
-            "d_path=%px swapper_pg_dir=%px\n",
-            p_lookup_address, p_flush_tlb_kernel_range, p_d_path,
-            (void *)g_swapper_pg_dir);
-
-    if (!g_swapper_pg_dir)
-        pr_err("[IceDriver] swapper_pg_dir not found, "
-               "pte slot will fallback to lookup_address\n");
-
-    return 0;
-}
 
 int ice_sym_init(void)
 {
-    /* STAGE1: 恢复 kprobe 与符号解析（ice_mem_init 仍为 stub） */
-    return ice_resolve_symbols();
+    unsigned long ttbr;
+    unsigned long pgd_pa;
+
+    asm volatile("mrs %0, ttbr1_el1" : "=r"(ttbr));
+
+    pgd_pa = (ttbr & GENMASK_ULL(47, 6)) |
+             ((ttbr & GENMASK_ULL(5, 2)) << 46);
+
+    g_swapper_pg_dir = (unsigned long)phys_to_virt(pgd_pa);
+
+    pr_info("[IceDriver] sym-free: ttbr1=0x%lx swapper_pg_dir=0x%lx\n",
+            ttbr, g_swapper_pg_dir);
+
+    return 0;
 }
 
 void ice_sym_exit(void)

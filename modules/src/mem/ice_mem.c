@@ -98,14 +98,9 @@ static void ice_free_pte_slots(void)
         memset(s, 0, sizeof(*s));
     }
 }
-
 static int ice_alloc_pte_slots(void)
 {
     int cpu;
-
-    /* STAGE0: 禁用 PTE 槽位分配（bisect 用），恢复时删掉下面两行 */
-    pr_info("[IceDriver] STAGE0: pte slots skipped\n");
-    return 0;
 
     if (in_atomic())
         return -EPERM;
@@ -113,7 +108,6 @@ static int ice_alloc_pte_slots(void)
     for_each_possible_cpu(cpu) {
         struct ice_pte_slot *s = per_cpu_ptr(&ice_pte_slots, cpu);
         uint64_t vaddr;
-        unsigned int level;
 
         s->placeholder_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
         if (!s->placeholder_page) {
@@ -127,13 +121,8 @@ static int ice_alloc_pte_slots(void)
             return -ENOMEM;
         }
 
+        /* 从 swapper_pg_dir（TTBR1 推导）走表找该 VA 的末级 PTE */
         s->pte_address = ice_get_kernel_pte(vaddr);
-        if (!s->pte_address && p_lookup_address) {
-            level = 0;
-            s->pte_address = p_lookup_address(vaddr, &level);
-            if (s->pte_address && level != 3)
-                s->pte_address = NULL;
-        }
         if (!s->pte_address) {
             pr_err("[IceDriver] slot pte failed, cpu=%d\n", cpu);
             ice_free_pte_slots();
