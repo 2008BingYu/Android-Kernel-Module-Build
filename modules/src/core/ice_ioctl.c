@@ -2,6 +2,9 @@
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/sched.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/task.h>
+#include <linux/mm.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 
@@ -18,13 +21,57 @@ static ICE_FILE_CTX *ice_get_ctx(struct file *filep)
 static pid_t ice_get_pid_by_name(const char *name)
 {
     struct task_struct *t;
+    pid_t ret = -ESRCH;
+    char *buf;
 
+    buf = kzalloc(0x100, GFP_KERNEL);
+    if (!buf)
+        return -ENOMEM;
+
+    rcu_read_lock();
     for_each_process(t) {
-        if (strcmp(t->comm, name) == 0)
-            return t->pid;
-    }
+        struct mm_struct *mm;
+        unsigned long arg_start, arg_end;
+        int len, got;
 
-    return -ESRCH;
+        if (!try_get_task_struct(t))
+            continue;
+        rcu_read_unlock();
+
+        mm = get_task_mm(t);
+        if (mm) {
+            arg_start = mm->arg_start;
+            arg_end   = mm->arg_end;
+
+            if (arg_start && arg_end > arg_start) {
+                len = (int)(arg_end - arg_start);
+                if (len > 0xFF)
+                    len = 0xFF;
+
+                got = access_process_vm(t, arg_start, buf, len, FOLL_FORCE);
+                if (got > 0) {
+                    buf[got] = '\0';
+                    if (strcmp(buf, name) == 0)
+                        ret = t->pid;
+                }
+            }
+
+            mmput(mm);
+        }
+
+        put_task_struct(t);
+
+        if (ret >= 0) {
+            kfree(buf);
+            return ret;
+        }
+
+        rcu_read_lock();
+    }
+    rcu_read_unlock();
+
+    kfree(buf);
+    return ret;
 }
 
 long ice_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
