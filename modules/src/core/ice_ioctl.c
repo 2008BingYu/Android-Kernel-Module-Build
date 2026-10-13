@@ -23,8 +23,14 @@ static pid_t ice_get_pid_by_name(const char *name)
     struct task_struct *t;
     pid_t ret = -ESRCH;
     char *buf;
+    size_t name_len, read_len;
 
-    buf = kzalloc(0x100, GFP_KERNEL);
+    name_len = strlen(name);
+    if (name_len == 0 || name_len >= 0xFF)
+        return -EINVAL;
+    read_len = name_len + 1;
+
+    buf = kzalloc(read_len + 1, GFP_KERNEL);
     if (!buf)
         return -ENOMEM;
 
@@ -33,6 +39,11 @@ static pid_t ice_get_pid_by_name(const char *name)
         struct mm_struct *mm;
         unsigned long arg_start, arg_end;
         int len, got;
+
+        /* 第一道：comm 前 15 字符快速筛选（纯内存比对，不睡眠）。
+         * 绝大多数进程在这里就被淘汰，只有候选才走下面的跨进程读。 */
+        if (strncmp(t->comm, name, TASK_COMM_LEN - 1) != 0)
+            continue;
 
         if (!try_get_task_struct(t))
             continue;
@@ -45,8 +56,8 @@ static pid_t ice_get_pid_by_name(const char *name)
 
             if (arg_start && arg_end > arg_start) {
                 len = (int)(arg_end - arg_start);
-                if (len > 0xFF)
-                    len = 0xFF;
+                if (len > (int)read_len)
+                    len = (int)read_len;
 
                 got = access_process_vm(t, arg_start, buf, len, FOLL_FORCE);
                 if (got > 0) {
