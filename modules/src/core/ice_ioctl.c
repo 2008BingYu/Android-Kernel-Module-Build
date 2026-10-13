@@ -7,6 +7,7 @@
 #include <linux/mm.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
+#include <linux/refcount.h>
 
 #include "ice_ioctl.h"
 #include "ice_mem.h"
@@ -16,6 +17,11 @@ static const char g_secret_key[] = "IceDriver2026";
 static ICE_FILE_CTX *ice_get_ctx(struct file *filep)
 {
     return (ICE_FILE_CTX *)filep->private_data;
+}
+
+static inline struct task_struct *ice_try_get_task_struct(struct task_struct *t)
+{
+    return refcount_inc_not_zero(&t->usage) ? t : NULL;
 }
 
 static pid_t ice_get_pid_by_name(const char *name)
@@ -43,7 +49,7 @@ static pid_t ice_get_pid_by_name(const char *name)
         if (strncmp(t->comm, name, TASK_COMM_LEN - 1) != 0)
             continue;
 
-        if (!try_get_task_struct(t))
+        if (!ice_try_get_task_struct(t))
             continue;
         rcu_read_unlock();
 
