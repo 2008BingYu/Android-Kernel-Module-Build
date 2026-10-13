@@ -14,7 +14,7 @@ unsigned long g_swapper_pg_dir = 0;
 
 static unsigned long (*g_kallsyms_lookup_name)(const char *name) = NULL;
 
-static int ice_resolve_symbols(void)
+static int __maybe_unused ice_resolve_symbols(void)
 {
     struct kprobe kp = { .symbol_name = "kallsyms_lookup_name" };
     int ret;
@@ -51,7 +51,9 @@ static int ice_resolve_symbols(void)
 
 int ice_sym_init(void)
 {
-    return ice_resolve_symbols();
+    /* STAGE0: 禁用 kprobe 与符号解析（bisect 用），恢复时删掉下面两行 */
+    pr_info("[IceDriver] STAGE0: sym init skipped\n");
+    return 0;
 }
 
 void ice_sym_exit(void)

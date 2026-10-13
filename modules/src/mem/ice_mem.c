@@ -1,25 +1,3 @@
-/*
- * ice_mem.c — 进程内存读写核心（lsdriver 读写方案原样移植）
- *
- * 与 lsdriver/lsdriver/virtual_memory_rw.h 机制一一对应：
- *   翻译   ：手动走页表 VA->PA（walk_translate_va_to_pa）
- *   快路径 ：linear map 直读写（phys_to_virt + __is_lm_address）——生产路径，
- *            用户只读页在内核 linear map 中是 RW，可直接写
- *   慢路径 ：per-CPU PTE 槽位（alloc_page 占位页 + vmap(PAGE_KERNEL_RO) 拿 VA
- *            + get_kernel_pte 找末级 PTE + set_pte 改写 + TLBI 刷当前 CPU），
- *            linear 失败时回退
- *   符号   ：kprobe 偷 kallsyms_lookup_name 解析 swapper_pg_dir（ice_sym.c）
- *
- * 与 lsdriver 原版的差异（均为安全加固，不改机制）：
- *   1. memcpy 换成 ice_copy_nofault：逐字节 ldrb/strb + 异常表，
- *      坏地址返回 -EFAULT 不 panic；
- *   2. linear 失败自动回退 PTE 槽位（原版只走一条）。
- *
- * 对外接口完全不变：
- *   ice_read_mem / ice_write_mem / ice_mem_init / ice_mem_exit，
- *   返回约定不变（成功返回字节数，失败返回负错误码）。
- */
-
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -123,6 +101,10 @@ static void ice_free_pte_slots(void)
 
 static int ice_alloc_pte_slots(void)
 {
+    /* STAGE0: 禁用 PTE 槽位分配（bisect 用），恢复时删掉下面两行 */
+    pr_info("[IceDriver] STAGE0: pte slots skipped\n");
+    return 0;
+
     int cpu;
 
     if (in_atomic())
