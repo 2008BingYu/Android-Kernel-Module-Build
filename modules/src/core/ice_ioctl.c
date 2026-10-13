@@ -40,8 +40,6 @@ static pid_t ice_get_pid_by_name(const char *name)
         unsigned long arg_start, arg_end;
         int len, got;
 
-        /* 第一道：comm 前 15 字符快速筛选（纯内存比对，不睡眠）。
-         * 绝大多数进程在这里就被淘汰，只有候选才走下面的跨进程读。 */
         if (strncmp(t->comm, name, TASK_COMM_LEN - 1) != 0)
             continue;
 

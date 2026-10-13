@@ -11,6 +11,7 @@
 #include <linux/file.h>
 #include <linux/dcache.h>
 #include <linux/path.h>
+#include <linux/string.h>
 
 #include "ice_compat.h"
 #include "ice_mem.h"
@@ -64,7 +65,7 @@ int ice_module_base(MODULE_BASE *mb)
         if (IS_ERR(p) || !p)
             continue;
 
-        if (strstr(p, mb->name)) {
+        if (strcmp(kbasename(p), mb->name) == 0) {
             mb->base = vma->vm_start;
             ret = 0;
             break;
