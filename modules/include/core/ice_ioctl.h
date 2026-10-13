@@ -5,9 +5,10 @@
 #include <linux/ioctl.h>
 
 #define OP_INIT_KEY     0x800
-#define OP_READ_MEM     0x801
-#define OP_WRITE_MEM    0x802
-#define OP_MODULE_BASE  0x803
+#define OP_GET_PID      0x801
+#define OP_MODULE_BASE  0x802
+#define OP_READ_MEM     0x803
+#define OP_WRITE_MEM    0x804
 
 typedef struct _COPY_MEMORY {
     pid_t     pid;
@@ -15,6 +16,11 @@ typedef struct _COPY_MEMORY {
     void     *buffer;
     size_t    size;
 } COPY_MEMORY;
+
+typedef struct _GET_PID {
+    char     *name;
+    pid_t     pid;
+} GET_PID;
 
 typedef struct _MODULE_BASE {
     pid_t     pid;

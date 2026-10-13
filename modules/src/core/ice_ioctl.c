@@ -1,6 +1,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
+#include <linux/sched.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 
@@ -14,10 +15,24 @@ static ICE_FILE_CTX *ice_get_ctx(struct file *filep)
     return (ICE_FILE_CTX *)filep->private_data;
 }
 
+/* 按线程组组长(进程)名查 pid，找不到返回 -ESRCH */
+static pid_t ice_get_pid_by_name(const char *name)
+{
+    struct task_struct *t;
+
+    for_each_process(t) {
+        if (strcmp(t->comm, name) == 0)
+            return t->pid;
+    }
+
+    return -ESRCH;
+}
+
 long ice_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 {
     ICE_FILE_CTX *ctx = ice_get_ctx(filep);
     COPY_MEMORY cm;
+    GET_PID gp;
     MODULE_BASE mb;
     char name_buf[256];
     char user_key[0x100];
@@ -44,21 +59,32 @@ long ice_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
         pr_warn("[IceDriver] bad key\n");
         return -EACCES;
 
-    case OP_READ_MEM:
+    case OP_GET_PID:
         if (!ctx->authorized)
             return -EACCES;
 
-        if (copy_from_user(&cm, (void __user *)arg, sizeof(cm)))
-            return -EFAULT;
-        return ice_read_mem(&cm);
+        memset(name_buf, 0, sizeof(name_buf));
 
-    case OP_WRITE_MEM:
-        if (!ctx->authorized)
-            return -EACCES;
-
-        if (copy_from_user(&cm, (void __user *)arg, sizeof(cm)))
+        if (copy_from_user(&gp, (void __user *)arg, sizeof(gp)))
             return -EFAULT;
-        return ice_write_mem(&cm);
+
+        user_name = (unsigned long)gp.name;
+        if (!user_name)
+            return -EINVAL;
+
+        if (strncpy_from_user(name_buf, (void __user *)user_name,
+                              sizeof(name_buf) - 1) < 0)
+            return -EFAULT;
+
+        ret = ice_get_pid_by_name(name_buf);
+        if (ret < 0)
+            return ret;
+
+        if (copy_to_user(&((GET_PID __user *)arg)->pid,
+                         &ret, sizeof(ret)))
+            return -EFAULT;
+
+        return 0;
 
     case OP_MODULE_BASE:
         if (!ctx->authorized)
@@ -88,6 +114,22 @@ long ice_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
             return -EFAULT;
 
         return 0;
+
+    case OP_READ_MEM:
+        if (!ctx->authorized)
+            return -EACCES;
+
+        if (copy_from_user(&cm, (void __user *)arg, sizeof(cm)))
+            return -EFAULT;
+        return ice_read_mem(&cm);
+
+    case OP_WRITE_MEM:
+        if (!ctx->authorized)
+            return -EACCES;
+
+        if (copy_from_user(&cm, (void __user *)arg, sizeof(cm)))
+            return -EFAULT;
+        return ice_write_mem(&cm);
 
     default:
         return -EINVAL;
