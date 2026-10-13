@@ -101,11 +101,11 @@ static void ice_free_pte_slots(void)
 
 static int ice_alloc_pte_slots(void)
 {
+    int cpu;
+
     /* STAGE0: 禁用 PTE 槽位分配（bisect 用），恢复时删掉下面两行 */
     pr_info("[IceDriver] STAGE0: pte slots skipped\n");
     return 0;
-
-    int cpu;
 
     if (in_atomic())
         return -EPERM;
