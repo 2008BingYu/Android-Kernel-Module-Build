@@ -15,7 +15,6 @@ static ICE_FILE_CTX *ice_get_ctx(struct file *filep)
     return (ICE_FILE_CTX *)filep->private_data;
 }
 
-/* 按线程组组长(进程)名查 pid，找不到返回 -ESRCH */
 static pid_t ice_get_pid_by_name(const char *name)
 {
     struct task_struct *t;
@@ -139,8 +138,6 @@ long ice_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
         if (copy_from_user(&ptr, (void __user *)arg, sizeof(ptr)))
             return -EFAULT;
 
-        /* 直接复用 ice_read_mem：buffer 指向用户结构体里的
-         * value 字段，读出的指针值由它 copy_to_user 写回 */
         cm.pid    = ptr.pid;
         cm.addr   = ptr.addr;
         cm.buffer = &((GET_POINTER __user *)arg)->value;
