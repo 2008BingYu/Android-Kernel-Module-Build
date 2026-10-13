@@ -23,6 +23,31 @@
 #define ICE_MAX_RW_SIZE (1024 * 1024)
 
 
+/* 地址路由：arm64 上 bit63=1 即内核地址（0xffff...），用户地址最高位恒为 0 */
+static inline bool ice_is_kernel_addr(unsigned long addr)
+{
+    return (addr >> 63) != 0;
+}
+
+/* 按 CTR_EL0.IminLine 步长对 VA 范围做 ic ivau + 屏障（写代码段后刷 icache） */
+static inline void ice_flush_icache_va(unsigned long start, size_t size)
+{
+    unsigned long ctr;
+    unsigned long line;
+    unsigned long a;
+    unsigned long end = start + size;
+
+    asm volatile("mrs %0, ctr_el0" : "=r"(ctr));
+    line = 4UL << (ctr & 0xF);
+
+    for (a = start; a < end; a += line)
+        asm volatile("ic ivau, %0" : : "r"(a));
+
+    asm volatile("dsb ish" ::: "memory");
+    asm volatile("isb" ::: "memory");
+}
+
+
 #define ICE_ASM_EXTABLE(from, to)                             \
     "   .pushsection    __ex_table, \"a\"\n"                  \
     "   .align          3\n"                                  \
@@ -196,7 +221,7 @@ static inline int ice_pte_write_physical(phys_addr_t paddr, const void *buffer, 
     return status;
 }
 
-static int ice_walk_translate_va_to_pa(struct mm_struct *mm, uint64_t vaddr,
+static int ice_walk_translate_va_to_pa(pgd_t *pgd_base, uint64_t vaddr,
                                        phys_addr_t *paddr)
 {
     pgd_t *pgd;
@@ -208,10 +233,10 @@ static int ice_walk_translate_va_to_pa(struct mm_struct *mm, uint64_t vaddr,
     unsigned long pfn;
     uint64_t page_mask;
 
-    if (!mm || !paddr)
+    if (!pgd_base || !paddr)
         return -EINVAL;
 
-    pgd = pgd_offset(mm, vaddr);
+    pgd = pgd_base + pgd_index(vaddr);
     if (pgd_none(*pgd) || pgd_bad(*pgd))
         return -EFAULT;
 
@@ -316,12 +341,21 @@ static int ice_rw_mem_force(struct mm_struct *mm, unsigned long addr,
                             void *buffer, size_t size, bool write)
 {
     uint64_t current_vaddr = untagged_addr(addr);
+    pgd_t *pgd_base;
     size_t bytes_processed = 0;
     size_t bytes_done = 0;
     int status = 0;
 
     if (!buffer || size == 0)
         return -EINVAL;
+
+    /* 用户路径走目标 mm->pgd；内核路径走 TTBR1 推导的 swapper_pg_dir */
+    if (mm)
+        pgd_base = mm->pgd;
+    else if (g_swapper_pg_dir)
+        pgd_base = (pgd_t *)g_swapper_pg_dir;
+    else
+        return -ENODEV;
 
     while (bytes_processed < size) {
         size_t bytes_this_page = PAGE_SIZE - (current_vaddr & (PAGE_SIZE - 1));
@@ -330,7 +364,7 @@ static int ice_rw_mem_force(struct mm_struct *mm, unsigned long addr,
         if (bytes_this_page > size - bytes_processed)
             bytes_this_page = size - bytes_processed;
 
-        status = ice_walk_translate_va_to_pa(mm, current_vaddr, &paddr);
+        status = ice_walk_translate_va_to_pa(pgd_base, current_vaddr, &paddr);
 
         if (status == 0) {
             if (!write)
@@ -350,6 +384,35 @@ static int ice_rw_mem_force(struct mm_struct *mm, unsigned long addr,
             }
         }
 
+        /* 用户路径 walk 失败（swap 换出/按需未加载）：GUP 换入后直读写 */
+        if (status != 0 && mm) {
+            struct page *page = NULL;
+            long got;
+            void *pva;
+            int st;
+
+            got = get_user_pages_remote(mm, current_vaddr, 1, FOLL_FORCE,
+                                        &page, NULL, NULL);
+            if (got == 1 && page) {
+                pva = page_address(page);
+                if (pva) {
+                    st = write
+                        ? ice_copy_nofault(pva + (current_vaddr & ~PAGE_MASK),
+                                           (uint8_t *)buffer + bytes_processed,
+                                           bytes_this_page)
+                        : ice_copy_nofault((uint8_t *)buffer + bytes_processed,
+                                           pva + (current_vaddr & ~PAGE_MASK),
+                                           bytes_this_page);
+                    if (st == 0) {
+                        if (write)
+                            set_page_dirty(page);
+                        status = 0;
+                    }
+                }
+                put_page(page);
+            }
+        }
+
         if (status == 0) {
             bytes_done += bytes_this_page;
         } else if (!write && size > 8) {
@@ -366,7 +429,8 @@ static int ice_rw_mem_force(struct mm_struct *mm, unsigned long addr,
 
 int ice_read_mem(COPY_MEMORY *cm)
 {
-    struct mm_struct *mm;
+    struct mm_struct *mm = NULL;
+    bool kspace;
     void *kbuf;
     int ret;
 
@@ -375,18 +439,26 @@ int ice_read_mem(COPY_MEMORY *cm)
     if (cm->size > ICE_MAX_RW_SIZE)
         return -EINVAL;
 
+    kspace = ice_is_kernel_addr((unsigned long)cm->addr);
+
     kbuf = kvmalloc(cm->size, GFP_KERNEL);
     if (!kbuf)
         return -ENOMEM;
 
-    mm = ice_get_mm_by_pid(cm->pid);
-    if (!mm) {
+    if (!kspace) {
+        mm = ice_get_mm_by_pid(cm->pid);
+        if (!mm) {
+            kvfree(kbuf);
+            return -ESRCH;
+        }
+    } else if (!g_swapper_pg_dir) {
         kvfree(kbuf);
-        return -ESRCH;
+        return -ENODEV;
     }
 
-    ret = ice_rw_mem_force(mm, cm->addr, kbuf, cm->size, false);
-    mmput(mm);
+    ret = ice_rw_mem_force(mm, (unsigned long)cm->addr, kbuf, cm->size, false);
+    if (mm)
+        mmput(mm);
 
     if (ret > 0 &&
         copy_to_user((void __user *)cm->buffer, kbuf, ret))
@@ -398,7 +470,8 @@ int ice_read_mem(COPY_MEMORY *cm)
 
 int ice_write_mem(COPY_MEMORY *cm)
 {
-    struct mm_struct *mm;
+    struct mm_struct *mm = NULL;
+    bool kspace;
     void *kbuf;
     int ret;
 
@@ -406,6 +479,8 @@ int ice_write_mem(COPY_MEMORY *cm)
         return -EINVAL;
     if (cm->size > ICE_MAX_RW_SIZE)
         return -EINVAL;
+
+    kspace = ice_is_kernel_addr((unsigned long)cm->addr);
 
     kbuf = kvmalloc(cm->size, GFP_KERNEL);
     if (!kbuf)
@@ -416,14 +491,24 @@ int ice_write_mem(COPY_MEMORY *cm)
         return -EFAULT;
     }
 
-    mm = ice_get_mm_by_pid(cm->pid);
-    if (!mm) {
+    if (!kspace) {
+        mm = ice_get_mm_by_pid(cm->pid);
+        if (!mm) {
+            kvfree(kbuf);
+            return -ESRCH;
+        }
+    } else if (!g_swapper_pg_dir) {
         kvfree(kbuf);
-        return -ESRCH;
+        return -ENODEV;
     }
 
-    ret = ice_rw_mem_force(mm, cm->addr, kbuf, cm->size, true);
-    mmput(mm);
+    ret = ice_rw_mem_force(mm, (unsigned long)cm->addr, kbuf, cm->size, true);
+    if (mm)
+        mmput(mm);
+
+    /* 写后刷 icache：改代码段立即生效，避免目标执行旧指令 */
+    if (ret > 0)
+        ice_flush_icache_va(untagged_addr((unsigned long)cm->addr), ret);
 
     kvfree(kbuf);
     return ret;
@@ -439,7 +524,7 @@ int ice_mem_init(void)
         return ret;
     }
 
-    pr_info("[IceDriver] memory core ready (lsdriver scheme)\n");
+    pr_info("[IceDriver] memory core ready (lsdriver scheme, auto kernel/process routing)\n");
     return 0;
 }
 
