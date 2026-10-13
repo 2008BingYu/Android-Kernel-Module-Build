@@ -32,6 +32,8 @@ typedef struct _GET_POINTER {
 typedef struct _MODULE_BASE {
     pid_t     pid;
     char     *name;
+    char      perm[8];
+    int       index;
     uintptr_t base;
 } MODULE_BASE;
 

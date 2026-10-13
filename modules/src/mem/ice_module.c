@@ -30,12 +30,29 @@ static struct task_struct *ice_mod_find_task(pid_t pid)
     return task;
 }
 
+static bool ice_vma_perm_match(struct vm_area_struct *vma, const char *perm)
+{
+    char cur[5];
+
+    if (!perm || perm[0] == '\0')
+        return true;
+
+    cur[0] = (vma->vm_flags & VM_READ)   ? 'r' : '-';
+    cur[1] = (vma->vm_flags & VM_WRITE)  ? 'w' : '-';
+    cur[2] = (vma->vm_flags & VM_EXEC)   ? 'x' : '-';
+    cur[3] = (vma->vm_flags & VM_SHARED) ? 's' : 'p';
+    cur[4] = '\0';
+
+    return strcmp(cur, perm) == 0;
+}
+
 int ice_module_base(MODULE_BASE *mb)
 {
     struct task_struct *task;
     struct mm_struct *mm;
     struct vm_area_struct *vma;
     char path_buf[256];
+    int count = 0;
     int ret = -ENOENT;
 
     if (!mb || !mb->name)
@@ -65,11 +82,19 @@ int ice_module_base(MODULE_BASE *mb)
         if (IS_ERR(p) || !p)
             continue;
 
-        if (strcmp(kbasename(p), mb->name) == 0) {
-            mb->base = vma->vm_start;
-            ret = 0;
-            break;
-        }
+        if (strcmp(kbasename(p), mb->name) != 0)
+            continue;
+
+        if (!ice_vma_perm_match(vma, mb->perm))
+            continue;
+
+        count++;
+        if (mb->index > 0 && count < mb->index)
+            continue;
+
+        mb->base = vma->vm_start;
+        ret = 0;
+        break;
     ICE_FOR_EACH_VMA_END()
 
     mmap_read_unlock(mm);
