@@ -40,7 +40,7 @@ static bool ice_vma_perm_match(struct vm_area_struct *vma, const char *perm)
     cur[0] = (vma->vm_flags & VM_READ)   ? 'r' : '-';
     cur[1] = (vma->vm_flags & VM_WRITE)  ? 'w' : '-';
     cur[2] = (vma->vm_flags & VM_EXEC)   ? 'x' : '-';
-    cur[3] = (vma->vm_flags & VM_SHARED) ? 's' : 'p';
+    cur[3] = (vma->vm_flags & VM_MAYSHARE) ? 's' : 'p';
     cur[4] = '\0';
 
     return strcmp(cur, perm) == 0;
