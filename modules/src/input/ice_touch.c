@@ -399,8 +399,10 @@ int ice_touch_geom(TOUCH_IO *t)
         return -ENODEV;
     }
 
-    g_scr_w   = t->x;
-    g_scr_h   = t->y;
+    if (t->x >= 2 && t->y >= 2) {
+        g_scr_w = t->x;
+        g_scr_h = t->y;
+    }
     g_scr_rot = t->slot & 3;
 
     t->x_max = g_max_x;
