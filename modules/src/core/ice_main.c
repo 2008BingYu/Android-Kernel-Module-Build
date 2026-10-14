@@ -85,7 +85,6 @@ static int __init ice_init(void)
         return -1;
     }
 
-    /* 触摸是附加能力, 注册失败不致命, 内存读写照常可用 */
     if (ice_touch_init() < 0)
         pr_warn("[IceDriver] touch init failed, touch disabled\n");
 
