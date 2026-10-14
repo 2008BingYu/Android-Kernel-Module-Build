@@ -11,6 +11,7 @@
 #include "ice_device.h"
 #include "ice_mem.h"
 #include "ice_sym.h"
+#include "ice_touch.h"
 
 #define DEVICE_NAME "IceDriver"
 #define CLASS_NAME  "IceDriver"
@@ -84,8 +85,13 @@ static int __init ice_init(void)
         return -1;
     }
 
+    /* 触摸是附加能力, 注册失败不致命, 内存读写照常可用 */
+    if (ice_touch_init() < 0)
+        pr_warn("[IceDriver] touch init failed, touch disabled\n");
+
     if (alloc_chrdev_region(&ice_dev, 0, 1, DEVICE_NAME) < 0) {
         pr_err("[IceDriver] failed to allocate device number\n");
+        ice_touch_exit();
         ice_mem_exit();
         ice_sym_exit();
         return -1;
@@ -95,6 +101,7 @@ static int __init ice_init(void)
     cdev_init(&ice_cdev, &fops);
     if (cdev_add(&ice_cdev, ice_dev, 1) < 0) {
         unregister_chrdev_region(ice_dev, 1);
+        ice_touch_exit();
         ice_mem_exit();
         ice_sym_exit();
         return -1;
@@ -105,6 +112,7 @@ static int __init ice_init(void)
     if (IS_ERR(ice_class)) {
         cdev_del(&ice_cdev);
         unregister_chrdev_region(ice_dev, 1);
+        ice_touch_exit();
         ice_mem_exit();
         ice_sym_exit();
         return -1;
@@ -115,6 +123,7 @@ static int __init ice_init(void)
         class_destroy(ice_class);
         cdev_del(&ice_cdev);
         unregister_chrdev_region(ice_dev, 1);
+        ice_touch_exit();
         ice_mem_exit();
         ice_sym_exit();
         return -1;
@@ -130,6 +139,7 @@ static void __exit ice_exit(void)
     class_destroy(ice_class);
     cdev_del(&ice_cdev);
     unregister_chrdev_region(ice_dev, 1);
+    ice_touch_exit();
     ice_mem_exit();
     ice_sym_exit();
     pr_info("[IceDriver] unloaded\n");

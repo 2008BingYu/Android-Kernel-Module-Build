@@ -11,6 +11,7 @@
 
 #include "ice_ioctl.h"
 #include "ice_mem.h"
+#include "ice_touch.h"
 
 static const char g_secret_key[] = "IceDriver2026";
 
@@ -96,6 +97,7 @@ long ice_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
     GET_PID gp;
     GET_POINTER ptr;
     MODULE_BASE mb;
+    TOUCH_IO touch;
     char name_buf[256];
     char user_key[0x100];
     unsigned long user_name;
@@ -210,6 +212,27 @@ long ice_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
             return ret;
 
         return 0;
+
+    case OP_TOUCH:
+        if (!ctx->authorized)
+            return -EACCES;
+
+        if (copy_from_user(&touch, (void __user *)arg, sizeof(touch)))
+            return -EFAULT;
+
+        if (touch.mode == TOUCH_MODE_CONFIG) {
+            ret = ice_touch_config(&touch);
+            if (ret == 0 &&
+                copy_to_user(&((TOUCH_IO __user *)arg)->x,
+                             &touch.x, sizeof(int) * 4))
+                return -EFAULT;
+            return ret;
+        }
+
+        if (touch.mode == TOUCH_MODE_EVENT)
+            return ice_touch_event(&touch);
+
+        return -EINVAL;
 
     default:
         return -EINVAL;
