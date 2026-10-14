@@ -34,6 +34,10 @@ static bool g_initialized;
 
 static int g_max_x, g_max_y;
 
+static int g_scr_w;
+static int g_scr_h;
+static int g_scr_rot;
+
 static struct input_dev *g_found;
 
 static const struct input_device_id ice_finder_ids[] = {
@@ -167,6 +171,35 @@ static void ice_touch_update_global_keys(void)
         ice_touch_set_key_bits(dev, false);
 }
 
+static int ice_touch_map_xy(int in_x, int in_y, int *out_x, int *out_y)
+{
+    int px, py;
+
+    if (g_scr_w < 2 || g_scr_h < 2) {
+        if (in_x < 0 || in_y < 0 || in_x >= g_max_x || in_y >= g_max_y)
+            return -EINVAL;
+        *out_x = in_x;
+        *out_y = in_y;
+        return 0;
+    }
+
+    switch (g_scr_rot & 3) {
+    case 1:  px = g_scr_w - 1 - in_y; py = in_x;               break;
+    case 2:  px = g_scr_w - 1 - in_x; py = g_scr_h - 1 - in_y; break;
+    case 3:  px = in_y;               py = g_scr_h - 1 - in_x; break;
+    default: px = in_x;               py = in_y;               break;
+    }
+
+    if (px < 0) px = 0;
+    if (px > g_scr_w - 1) px = g_scr_w - 1;
+    if (py < 0) py = 0;
+    if (py > g_scr_h - 1) py = g_scr_h - 1;
+
+    *out_x = (int)((long long)px * g_max_x / (g_scr_w - 1));
+    *out_y = (int)((long long)py * g_max_y / (g_scr_h - 1));
+    return 0;
+}
+
 static int ice_touch_send_report(int vslot, int x, int y, bool touching)
 {
     struct input_dev *dev = g_dev;
@@ -292,6 +325,10 @@ static void ice_touch_destroy_locked(void)
 
     g_initialized = false;
 
+    g_scr_w = 0;
+    g_scr_h = 0;
+    g_scr_rot = 0;
+
     for (i = 0; i < ICE_TOUCH_MAX_VIRTUAL_SLOTS; i++)
         g_tracking_ids[i] = -1;
 }
@@ -350,18 +387,45 @@ out:
 }
 
 
+int ice_touch_geom(TOUCH_IO *t)
+{
+    if (!t)
+        return -EINVAL;
+
+    mutex_lock(&ice_touch_lock);
+
+    if (!g_initialized || !g_dev) {
+        mutex_unlock(&ice_touch_lock);
+        return -ENODEV;
+    }
+
+    g_scr_w   = t->x;
+    g_scr_h   = t->y;
+    g_scr_rot = t->slot & 3;
+
+    t->x_max = g_max_x;
+    t->y_max = g_max_y;
+
+    mutex_unlock(&ice_touch_lock);
+    return 0;
+}
+
+
 static int ice_touch_down(const TOUCH_IO *t)
 {
     int vslot = t->slot;
+    int mx, my;
     int ret;
 
     if ((unsigned)vslot >= (unsigned)g_virtual_slots)
         return -EINVAL;
-    if (t->x < 0 || t->y < 0 || t->x >= g_max_x || t->y >= g_max_y)
+    if (t->x < 0 || t->y < 0)
+        return -EINVAL;
+    if (ice_touch_map_xy(t->x, t->y, &mx, &my))
         return -EINVAL;
 
     if (g_tracking_ids[vslot] != -1) {
-        return ice_touch_send_report(vslot, t->x, t->y, true);
+        return ice_touch_send_report(vslot, mx, my, true);
     }
 
     g_tracking_ids[vslot] = ICE_TOUCH_TRACKING_ID_BASE + vslot;
@@ -369,7 +433,7 @@ static int ice_touch_down(const TOUCH_IO *t)
     if (ice_vt_active_count() == 1) {
         ice_touch_truncate_slots();
 
-        ret = ice_touch_send_report(vslot, t->x, t->y, true);
+        ret = ice_touch_send_report(vslot, mx, my, true);
         if (ret) {
             g_tracking_ids[vslot] = -1;
             ice_touch_restore_slots();
@@ -378,7 +442,7 @@ static int ice_touch_down(const TOUCH_IO *t)
         ice_touch_set_key_bits(g_dev, false);
         g_keys_locked = true;
     } else {
-        ret = ice_touch_send_report(vslot, t->x, t->y, true);
+        ret = ice_touch_send_report(vslot, mx, my, true);
         if (ret)
             g_tracking_ids[vslot] = -1;
     }
@@ -389,15 +453,18 @@ static int ice_touch_down(const TOUCH_IO *t)
 static int ice_touch_move(const TOUCH_IO *t)
 {
     int vslot = t->slot;
+    int mx, my;
 
     if ((unsigned)vslot >= (unsigned)g_virtual_slots)
         return -EINVAL;
     if (g_tracking_ids[vslot] == -1)
         return -EINVAL;
-    if (t->x < 0 || t->y < 0 || t->x >= g_max_x || t->y >= g_max_y)
+    if (t->x < 0 || t->y < 0)
+        return -EINVAL;
+    if (ice_touch_map_xy(t->x, t->y, &mx, &my))
         return -EINVAL;
 
-    return ice_touch_send_report(vslot, t->x, t->y, true);
+    return ice_touch_send_report(vslot, mx, my, true);
 }
 
 static int ice_touch_up(const TOUCH_IO *t)

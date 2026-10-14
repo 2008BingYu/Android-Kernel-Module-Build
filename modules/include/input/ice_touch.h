@@ -10,4 +10,6 @@ int ice_touch_event(const TOUCH_IO *t);
 
 int ice_touch_config(TOUCH_IO *t);
 
+int ice_touch_geom(TOUCH_IO *t);
+
 #endif

@@ -14,6 +14,7 @@
 
 #define TOUCH_MODE_EVENT    0
 #define TOUCH_MODE_CONFIG   1
+#define TOUCH_MODE_GEOM     2
 
 #define TOUCH_ACTION_DOWN   0
 #define TOUCH_ACTION_MOVE   1

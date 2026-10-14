@@ -229,6 +229,15 @@ long ice_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
             return ret;
         }
 
+        if (touch.mode == TOUCH_MODE_GEOM) {
+            ret = ice_touch_geom(&touch);
+            if (ret == 0 &&
+                copy_to_user(&((TOUCH_IO __user *)arg)->x_max,
+                             &touch.x_max, sizeof(int) * 2))
+                return -EFAULT;
+            return ret;
+        }
+
         if (touch.mode == TOUCH_MODE_EVENT)
             return ice_touch_event(&touch);
 
