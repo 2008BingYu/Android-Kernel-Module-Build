@@ -12,19 +12,18 @@
 #define ICE_TOUCH_MAX_VIRTUAL_SLOTS     5
 #define ICE_TOUCH_DEFAULT_VIRTUAL_SLOTS 2
 #define ICE_TOUCH_TRACKING_ID_BASE      40000
-#define ICE_TOUCH_MAX_POOL              10
 
 static DEFINE_MUTEX(ice_touch_lock);
 
 static struct input_dev *g_dev;
 
-static int g_pool_slots;          /* 真实设备总 slot 数 */
+static int g_pool_slots;          /* 真实设备总 slot 数(保持原样) */
+static int g_physical_slots;      /* 注入期间留给真实驱动的槽位 */
 static int g_virtual_slots;       /* 虚拟槽位数 */
-static int g_virtual_slot_base;   /* 虚拟槽位起始索引(= pool) */
-static int g_total_slots;         /* pool + virtual */
+static int g_virtual_slot_base;   /* 虚拟槽位起始索引(= physical) */
 
-static struct input_mt *g_orig_mt;   /* 原 mt, destroy 时换回 */
-static struct input_mt *g_new_mt;    /* 扩容副本 */
+static unsigned int g_orig_flags;   /* hijack 前 mt->flags, destroy 还原 */
+static bool g_slots_truncated;      /* 当前是否处于截断态(仅注入期间) */
 
 static int  g_tracking_ids[ICE_TOUCH_MAX_VIRTUAL_SLOTS];
 static bool g_has_touch_major;
@@ -90,72 +89,65 @@ static inline int ice_vt_active_count(void)
 }
 
 /*
- * mt 扩容 + 设备重注册。
+ * 懒截断方案。
  *
- * 扩容: 分配「真实池 + 虚拟槽」的 input_mt 副本并原子替换 dev->mt,
- * 真实驱动遍历 0~(pool-1) 全部成功, 虚拟槽位落在 pool 之上永不冲突。
+ * 平时: num_slots 保持真实池大小, absinfo 原样, 真实驱动满血,
+ *       设备能力与未安装模块时完全一致, 设备从不注销/重注册,
+ *       无热插拔, InputReader 无需重读 —— 隐蔽性与真实触摸影响
+ *       双双为零。
  *
- * 重注册: InputReader 只在设备添加时读一次 ABS_MT_SLOT 能力,
- * 事后改 absinfo 它不会重读, 超出缓存范围的虚拟 slot 事件会被丢弃。
- * 所以必须先 input_unregister_device 再 input_register_device,
- * 让 InputReader 按扩容后的能力重建(触摸屏热插拔, Android 原生支持)。
+ * 注入期间: 首个虚拟手指按下时把尾部槽位收归虚拟(截断 num_slots),
+ *       虚拟槽位落在 InputReader 已缓存的真实池范围内, 直接生效;
+ *       全部虚拟手指抬起后立即恢复, 真实多指满血回归。
+ *
+ * 唯一代价窗口: 虚拟手指按住期间真实手指可用槽位 = physical。
+ * 不变式: g_slots_truncated == true 当且仅当存在活跃虚拟手指
+ *         (DOWN 失败路径已回滚, 不会残留截断态)。
  */
 static int ice_touch_hijack_slots(struct input_dev *dev)
 {
-    struct input_mt *old = dev->mt;
-    struct input_mt *new;
-    unsigned long flags;
-    int ret;
+    struct input_mt *mt = dev->mt;
 
-    if (!old || g_pool_slots < 2)
+    if (!mt || g_pool_slots < 2)
         return -EINVAL;
-    if (g_virtual_slots < 1 || g_virtual_slots > ICE_TOUCH_MAX_VIRTUAL_SLOTS)
+    if (g_virtual_slots < 1 ||
+        g_virtual_slots >= g_pool_slots ||
+        g_virtual_slots > ICE_TOUCH_MAX_VIRTUAL_SLOTS)
         return -EINVAL;
 
-    g_total_slots      = g_pool_slots + g_virtual_slots;
-    g_virtual_slot_base = g_pool_slots;
+    g_physical_slots    = g_pool_slots - g_virtual_slots;
+    g_virtual_slot_base = g_physical_slots;
+    g_slots_truncated   = false;
 
-    new = kzalloc(sizeof(*new) + g_total_slots * sizeof(struct input_mt_slot),
-                  GFP_KERNEL);
-    if (!new)
-        return -ENOMEM;
-
-    /* 复制头部(含 slots[0]) 与全部真实槽位数据 */
-    memcpy(new, old, sizeof(*new));
-    memcpy(new->slots, old->slots, g_pool_slots * sizeof(struct input_mt_slot));
-
-    new->num_slots = g_total_slots;
-    new->flags &= ~INPUT_MT_DROP_UNUSED;  /* 未更新槽位不丢弃 */
-    new->flags |= INPUT_MT_DIRECT;
-    new->flags &= ~INPUT_MT_POINTER;      /* 禁内核自动按键计算, 防 key flapping */
-
-    spin_lock_irqsave(&dev->event_lock, flags);
-    dev->mt = new;
-    spin_unlock_irqrestore(&dev->event_lock, flags);
-
-    g_orig_mt = old;
-    g_new_mt  = new;
-
-    /* 注销再注册, 让 InputReader 按新能力重建设备 */
-    input_unregister_device(dev);
-    input_set_abs_params(dev, ABS_MT_SLOT, 0, g_total_slots - 1, 0, 0);
-    ret = input_register_device(dev);
-    if (ret) {
-        /* 回滚: 换回原 mt、恢复 absinfo, 把设备救回来 */
-        spin_lock_irqsave(&dev->event_lock, flags);
-        dev->mt = old;
-        spin_unlock_irqrestore(&dev->event_lock, flags);
-
-        input_set_abs_params(dev, ABS_MT_SLOT, 0, g_pool_slots - 1, 0, 0);
-        input_register_device(dev);
-
-        kfree(new);
-        g_orig_mt = NULL;
-        g_new_mt  = NULL;
-        return ret;
-    }
+    /*
+     * flags 是内核内部状态, 用户态不可见, 不影响隐蔽性:
+     * DROP_UNUSED 清掉避免未更新槽位被释放;
+     * DIRECT 置位; POINTER 清掉禁用内核自动按键计算,
+     * 全局按键由我们手动维护。
+     */
+    g_orig_flags = mt->flags;
+    mt->flags &= ~INPUT_MT_DROP_UNUSED;
+    mt->flags |= INPUT_MT_DIRECT;
+    mt->flags &= ~INPUT_MT_POINTER;
 
     return 0;
+}
+
+/* 截断/恢复槽位: 只在注入进行时截断, 平时保持真实池满血 */
+static inline void ice_touch_truncate_slots(void)
+{
+    if (!g_slots_truncated && g_dev && g_dev->mt) {
+        g_dev->mt->num_slots = g_physical_slots;
+        g_slots_truncated = true;
+    }
+}
+
+static inline void ice_touch_restore_slots(void)
+{
+    if (g_slots_truncated && g_dev && g_dev->mt) {
+        g_dev->mt->num_slots = g_pool_slots;
+        g_slots_truncated = false;
+    }
 }
 
 static void ice_touch_set_key_bits(struct input_dev *dev, bool enable)
@@ -176,10 +168,12 @@ static void ice_touch_update_global_keys(void)
     struct input_dev *dev = g_dev;
     struct input_mt *mt = dev->mt;
     bool relock = g_keys_locked;
-    int i, count = 0;
+    int phys, i, count = 0;
 
-    /* 统计真实槽位上的真实手指(扩容后真实池完整, 满血统计) */
-    for (i = 0; i < g_pool_slots; i++) {
+    /* 截断态只统计真实槽位; 未截断(首次DOWN瞬间)统计完整池 */
+    phys = g_slots_truncated ? g_physical_slots : g_pool_slots;
+
+    for (i = 0; i < phys; i++) {
         if (input_mt_get_value(&mt->slots[i], ABS_MT_TRACKING_ID) != -1)
             count++;
     }
@@ -221,7 +215,9 @@ static int ice_touch_send_report(int vslot, int x, int y, bool touching)
 
     old_slot = mt->slot;
 
-    /* 扩容后 num_slots 常驻 total, 无需瞬间放开/收回 */
+    /* 虚拟槽在池内, 但截断态会被 input core 拒收;
+     * 发送前临时放开 num_slots, 发完按截断态收回 */
+    mt->num_slots = g_pool_slots;
 
     input_event(dev, EV_ABS, ABS_MT_SLOT, hw_slot);
 
@@ -240,6 +236,10 @@ static int ice_touch_send_report(int vslot, int x, int y, bool touching)
     }
 
     input_event(dev, EV_ABS, ABS_MT_SLOT, old_slot);
+
+    /* 归还真实驱动坑位后, 按截断态收回尾部槽位 */
+    if (g_slots_truncated)
+        mt->num_slots = g_physical_slots;
 
     ice_touch_update_global_keys();
 
@@ -261,7 +261,7 @@ static int ice_touch_hijack_locked(int virtual_slots)
         return -ENODEV;
     }
 
-    g_pool_slots = min(dev->mt->num_slots, ICE_TOUCH_MAX_POOL);
+    g_pool_slots = dev->mt->num_slots;
     if (g_pool_slots < 2) {
         put_device(&dev->dev);
         return -EINVAL;
@@ -287,8 +287,8 @@ static int ice_touch_hijack_locked(int virtual_slots)
 
     g_initialized = true;
 
-    pr_info("[IceDriver] touch hijack ready: pool=%d virtual=%d total=%d range=%dx%d\n",
-            g_pool_slots, g_virtual_slots, g_total_slots, g_max_x, g_max_y);
+    pr_info("[IceDriver] touch hijack ready: pool=%d physical=%d virtual=%d range=%dx%d\n",
+            g_pool_slots, g_physical_slots, g_virtual_slots, g_max_x, g_max_y);
     return 0;
 }
 
@@ -306,45 +306,16 @@ static void ice_touch_destroy_locked(void)
         }
     }
 
+    /* 截断态还原: num_slots 回到真实池 */
+    ice_touch_restore_slots();
+
     if (g_dev) {
+        /* 还原 hijack 时改过的 mt->flags */
+        if (g_dev->mt)
+            g_dev->mt->flags = g_orig_flags;
         ice_touch_set_key_bits(g_dev, true);
         g_keys_locked = false;
-    }
-
-    /* 换回原 mt 前先注销设备, 恢复后重新注册, InputReader 能力还原 */
-    if (g_dev)
-        input_unregister_device(g_dev);
-
-    if (g_dev && g_orig_mt && g_new_mt) {
-        unsigned long flags;
-
-        /*
-         * 把最新槽位状态拷回原 mt: 旧 mt 是 hijack 时刻的冻结快照,
-         * 若不回拷, hijack 期间一直按住的真实手指会在 destroy 后
-         * 变成幽灵触点残留。
-         */
-        memcpy(g_orig_mt->slots, g_new_mt->slots,
-               g_pool_slots * sizeof(struct input_mt_slot));
-        g_orig_mt->trkid = g_new_mt->trkid;
-        g_orig_mt->slot  = g_new_mt->slot;
-        g_orig_mt->frame = g_new_mt->frame;
-
-        spin_lock_irqsave(&g_dev->event_lock, flags);
-        g_dev->mt = g_orig_mt;
-        spin_unlock_irqrestore(&g_dev->event_lock, flags);
-
-        input_set_abs_params(g_dev, ABS_MT_SLOT, 0, g_pool_slots - 1, 0, 0);
-    }
-
-    if (g_new_mt) {
-        kfree(g_new_mt);
-        g_new_mt = NULL;
-    }
-    g_orig_mt = NULL;
-
-    if (g_dev) {
-        if (input_register_device(g_dev))
-            pr_err("[IceDriver] touch restore register failed\n");
+        /* 懒截断版从不注销设备, 只归还发现时持的引用 */
         put_device(&g_dev->dev);
         g_dev = NULL;
     }
@@ -426,9 +397,13 @@ static int ice_touch_down(const TOUCH_IO *t)
     g_tracking_ids[vslot] = ICE_TOUCH_TRACKING_ID_BASE + vslot;
 
     if (ice_vt_active_count() == 1) {
+        /* 首个虚拟手指: 先截断尾部槽位, 虚拟坑位生效 */
+        ice_touch_truncate_slots();
+
         ret = ice_touch_send_report(vslot, t->x, t->y, true);
         if (ret) {
             g_tracking_ids[vslot] = -1;
+            ice_touch_restore_slots();
             return ret;
         }
         ice_touch_set_key_bits(g_dev, false);
@@ -470,6 +445,8 @@ static int ice_touch_up(const TOUCH_IO *t)
     ice_touch_send_report(vslot, 0, 0, false);
 
     if (ice_vt_active_count() == 0) {
+        /* 全部虚拟手指抬起: 槽位满血回归 */
+        ice_touch_restore_slots();
         ice_touch_set_key_bits(g_dev, true);
         g_keys_locked = false;
     }
@@ -489,6 +466,7 @@ static int ice_touch_cancel(void)
     }
 
     if (g_keys_locked) {
+        ice_touch_restore_slots();
         ice_touch_set_key_bits(g_dev, true);
         g_keys_locked = false;
     }
