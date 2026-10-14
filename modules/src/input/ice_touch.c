@@ -90,15 +90,22 @@ static inline int ice_vt_active_count(void)
 }
 
 /*
- * mt 扩容: 分配「真实池 + 虚拟槽」的 input_mt 副本并原子替换 dev->mt。
- * 真实驱动遍历 0~(pool-1) 全部成功, 真实多指零损失;
- * 虚拟槽位落在 pool 之上, 真实驱动永远碰不到。
+ * mt 扩容 + 设备重注册。
+ *
+ * 扩容: 分配「真实池 + 虚拟槽」的 input_mt 副本并原子替换 dev->mt,
+ * 真实驱动遍历 0~(pool-1) 全部成功, 虚拟槽位落在 pool 之上永不冲突。
+ *
+ * 重注册: InputReader 只在设备添加时读一次 ABS_MT_SLOT 能力,
+ * 事后改 absinfo 它不会重读, 超出缓存范围的虚拟 slot 事件会被丢弃。
+ * 所以必须先 input_unregister_device 再 input_register_device,
+ * 让 InputReader 按扩容后的能力重建(触摸屏热插拔, Android 原生支持)。
  */
 static int ice_touch_hijack_slots(struct input_dev *dev)
 {
     struct input_mt *old = dev->mt;
     struct input_mt *new;
     unsigned long flags;
+    int ret;
 
     if (!old || g_pool_slots < 2)
         return -EINVAL;
@@ -129,8 +136,24 @@ static int ice_touch_hijack_slots(struct input_dev *dev)
     g_orig_mt = old;
     g_new_mt  = new;
 
-    /* Android 侧看到完整池 + 虚拟槽 */
+    /* 注销再注册, 让 InputReader 按新能力重建设备 */
+    input_unregister_device(dev);
     input_set_abs_params(dev, ABS_MT_SLOT, 0, g_total_slots - 1, 0, 0);
+    ret = input_register_device(dev);
+    if (ret) {
+        /* 回滚: 换回原 mt、恢复 absinfo, 把设备救回来 */
+        spin_lock_irqsave(&dev->event_lock, flags);
+        dev->mt = old;
+        spin_unlock_irqrestore(&dev->event_lock, flags);
+
+        input_set_abs_params(dev, ABS_MT_SLOT, 0, g_pool_slots - 1, 0, 0);
+        input_register_device(dev);
+
+        kfree(new);
+        g_orig_mt = NULL;
+        g_new_mt  = NULL;
+        return ret;
+    }
 
     return 0;
 }
@@ -288,7 +311,10 @@ static void ice_touch_destroy_locked(void)
         g_keys_locked = false;
     }
 
-    /* 换回原 mt, 释放扩容副本; 真实驱动与 absinfo 恢复原状 */
+    /* 换回原 mt 前先注销设备, 恢复后重新注册, InputReader 能力还原 */
+    if (g_dev)
+        input_unregister_device(g_dev);
+
     if (g_dev && g_orig_mt && g_new_mt) {
         unsigned long flags;
 
@@ -317,6 +343,8 @@ static void ice_touch_destroy_locked(void)
     g_orig_mt = NULL;
 
     if (g_dev) {
+        if (input_register_device(g_dev))
+            pr_err("[IceDriver] touch restore register failed\n");
         put_device(&g_dev->dev);
         g_dev = NULL;
     }
