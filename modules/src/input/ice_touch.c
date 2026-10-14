@@ -289,8 +289,19 @@ static void ice_touch_destroy_locked(void)
     }
 
     /* 换回原 mt, 释放扩容副本; 真实驱动与 absinfo 恢复原状 */
-    if (g_dev && g_orig_mt) {
+    if (g_dev && g_orig_mt && g_new_mt) {
         unsigned long flags;
+
+        /*
+         * 把最新槽位状态拷回原 mt: 旧 mt 是 hijack 时刻的冻结快照,
+         * 若不回拷, hijack 期间一直按住的真实手指会在 destroy 后
+         * 变成幽灵触点残留。
+         */
+        memcpy(g_orig_mt->slots, g_new_mt->slots,
+               g_pool_slots * sizeof(struct input_mt_slot));
+        g_orig_mt->trkid = g_new_mt->trkid;
+        g_orig_mt->slot  = g_new_mt->slot;
+        g_orig_mt->frame = g_new_mt->frame;
 
         spin_lock_irqsave(&g_dev->event_lock, flags);
         g_dev->mt = g_orig_mt;
