@@ -5,6 +5,7 @@
 #include <linux/device.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
+#include <linux/jiffies.h>
 
 #include "ice_compat.h"
 #include "ice_ioctl.h"
@@ -13,8 +14,7 @@
 #include "ice_sym.h"
 #include "ice_touch.h"
 
-#define DEVICE_NAME "IceDriver"
-#define CLASS_NAME  "IceDriver"
+#define ICE_NAME_LEN 8
 
 extern long ice_ioctl(struct file *filep, unsigned int cmd, unsigned long arg);
 
@@ -23,6 +23,7 @@ static struct class*  ice_class  = NULL;
 static struct device* ice_device = NULL;
 static struct cdev   ice_cdev;
 static dev_t         ice_dev;
+static char          ice_name[ICE_NAME_LEN + 1];
 
 static int ice_open(struct inode *inodep, struct file *filep)
 {
@@ -72,8 +73,23 @@ static struct file_operations fops = {
     .unlocked_ioctl = ice_unlocked_ioctl,
 };
 
+static void ice_make_name(void)
+{
+    static const char tbl[] = "abcdefghijklmnopqrstuvwxyz0123456789";
+    unsigned long seed = (unsigned long)jiffies ^ (unsigned long)&ice_cdev;
+    int i;
+
+    for (i = 0; i < ICE_NAME_LEN; i++) {
+        seed = seed * 1103515245UL + 12345UL;
+        ice_name[i] = tbl[(seed >> 8) % 36];
+    }
+    ice_name[ICE_NAME_LEN] = '\0';
+}
+
 static int __init ice_init(void)
 {
+    ice_make_name();
+
     if (ice_sym_init() < 0) {
         pr_err("[IceDriver] ice_sym_init failed\n");
         return -1;
@@ -88,7 +104,7 @@ static int __init ice_init(void)
     if (ice_touch_init() < 0)
         pr_warn("[IceDriver] touch init failed, touch disabled\n");
 
-    if (alloc_chrdev_region(&ice_dev, 0, 1, DEVICE_NAME) < 0) {
+    if (alloc_chrdev_region(&ice_dev, 0, 1, ice_name) < 0) {
         pr_err("[IceDriver] failed to allocate device number\n");
         ice_touch_exit();
         ice_mem_exit();
@@ -106,7 +122,18 @@ static int __init ice_init(void)
         return -1;
     }
 
-    ice_class = ICE_CLASS_CREATE(CLASS_NAME);
+    {
+        int tries;
+
+        for (tries = 0; tries < 8; tries++) {
+            ice_class = ICE_CLASS_CREATE(ice_name);
+            if (!IS_ERR(ice_class))
+                break;
+            if (PTR_ERR(ice_class) != -EEXIST)
+                break;
+            ice_make_name();
+        }
+    }
 
     if (IS_ERR(ice_class)) {
         cdev_del(&ice_cdev);
@@ -117,7 +144,7 @@ static int __init ice_init(void)
         return -1;
     }
 
-    ice_device = device_create(ice_class, NULL, ice_dev, NULL, DEVICE_NAME);
+    ice_device = device_create(ice_class, NULL, ice_dev, NULL, ice_name);
     if (IS_ERR(ice_device)) {
         class_destroy(ice_class);
         cdev_del(&ice_cdev);
