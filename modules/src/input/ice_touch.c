@@ -38,6 +38,10 @@ static int g_scr_w;
 static int g_scr_h;
 static int g_scr_rot;
 
+static int g_raw_scale = 10;
+module_param(g_raw_scale, int, 0644);
+MODULE_PARM_DESC(g_raw_scale, "touch raw-to-screen scale, default 10");
+
 static struct input_dev *g_found;
 
 static const struct input_device_id ice_finder_ids[] = {
@@ -190,13 +194,11 @@ static int ice_touch_map_xy(int in_x, int in_y, int *out_x, int *out_y)
     default: px = in_x;               py = in_y;               break;
     }
 
-    if (px < 0) px = 0;
-    if (px > g_scr_w - 1) px = g_scr_w - 1;
-    if (py < 0) py = 0;
-    if (py > g_scr_h - 1) py = g_scr_h - 1;
+    if (px < 0 || py < 0 || px >= g_scr_w || py >= g_scr_h)
+        return -EINVAL;
 
-    *out_x = (int)((long long)px * g_max_x / (g_scr_w - 1));
-    *out_y = (int)((long long)py * g_max_y / (g_scr_h - 1));
+    *out_x = (int)((long long)px * (g_max_x + 1) / g_scr_w);
+    *out_y = (int)((long long)py * (g_max_y + 1) / g_scr_h);
     return 0;
 }
 
@@ -258,6 +260,7 @@ static int ice_touch_hijack_locked(int virtual_slots)
 {
     struct input_dev *dev;
     int ret;
+    int i;
 
     g_dev = NULL;
 
@@ -275,6 +278,10 @@ static int ice_touch_hijack_locked(int virtual_slots)
 
     g_virtual_slots = virtual_slots;
 
+    for (i = 0; i < ICE_TOUCH_MAX_VIRTUAL_SLOTS; i++)
+        g_tracking_ids[i] = -1;
+    g_scr_rot = 0;
+
     ret = ice_touch_hijack_slots(dev);
     if (ret) {
         put_device(&dev->dev);
@@ -291,10 +298,16 @@ static int ice_touch_hijack_locked(int virtual_slots)
     g_max_x = dev->absinfo[ABS_MT_POSITION_X].maximum;
     g_max_y = dev->absinfo[ABS_MT_POSITION_Y].maximum;
 
+    if (g_raw_scale < 1)
+        g_raw_scale = 10;
+    g_scr_w = (g_max_x + 1) / g_raw_scale;
+    g_scr_h = (g_max_y + 1) / g_raw_scale;
+
     g_initialized = true;
 
-    pr_info("[IceDriver] touch hijack ready: pool=%d physical=%d virtual=%d range=%dx%d\n",
-            g_pool_slots, g_physical_slots, g_virtual_slots, g_max_x, g_max_y);
+    pr_info("[IceDriver] touch hijack ready: pool=%d physical=%d virtual=%d range=%dx%d screen=%dx%d\n",
+            g_pool_slots, g_physical_slots, g_virtual_slots, g_max_x, g_max_y,
+            g_scr_w, g_scr_h);
     return 0;
 }
 
@@ -324,7 +337,6 @@ static void ice_touch_destroy_locked(void)
     }
 
     g_initialized = false;
-
     g_scr_w = 0;
     g_scr_h = 0;
     g_scr_rot = 0;
@@ -386,7 +398,6 @@ out:
     return ret;
 }
 
-
 int ice_touch_geom(TOUCH_IO *t)
 {
     if (!t)
@@ -400,8 +411,13 @@ int ice_touch_geom(TOUCH_IO *t)
     }
 
     if (t->x >= 2 && t->y >= 2) {
-        g_scr_w = t->x;
-        g_scr_h = t->y;
+        if ((t->slot & 3) == 1 || (t->slot & 3) == 3) {
+            g_scr_w = t->y;
+            g_scr_h = t->x;
+        } else {
+            g_scr_w = t->x;
+            g_scr_h = t->y;
+        }
     }
     g_scr_rot = t->slot & 3;
 
@@ -412,7 +428,6 @@ int ice_touch_geom(TOUCH_IO *t)
     return 0;
 }
 
-
 static int ice_touch_down(const TOUCH_IO *t)
 {
     int vslot = t->slot;
@@ -420,8 +435,6 @@ static int ice_touch_down(const TOUCH_IO *t)
     int ret;
 
     if ((unsigned)vslot >= (unsigned)g_virtual_slots)
-        return -EINVAL;
-    if (t->x < 0 || t->y < 0)
         return -EINVAL;
     if (ice_touch_map_xy(t->x, t->y, &mx, &my))
         return -EINVAL;
@@ -460,8 +473,6 @@ static int ice_touch_move(const TOUCH_IO *t)
     if ((unsigned)vslot >= (unsigned)g_virtual_slots)
         return -EINVAL;
     if (g_tracking_ids[vslot] == -1)
-        return -EINVAL;
-    if (t->x < 0 || t->y < 0)
         return -EINVAL;
     if (ice_touch_map_xy(t->x, t->y, &mx, &my))
         return -EINVAL;
