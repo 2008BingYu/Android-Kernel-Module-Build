@@ -10,6 +10,7 @@
 #include <linux/refcount.h>
 
 #include "ice_ioctl.h"
+#include "ice_device.h"
 #include "ice_mem.h"
 #include "ice_touch.h"
 
