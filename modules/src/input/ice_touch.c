@@ -38,10 +38,6 @@ static int g_scr_w;
 static int g_scr_h;
 static int g_scr_rot;
 
-static int g_raw_scale = 10;
-module_param(g_raw_scale, int, 0644);
-MODULE_PARM_DESC(g_raw_scale, "touch raw-to-screen scale, default 10");
-
 static struct input_dev *g_found;
 
 static const struct input_device_id ice_finder_ids[] = {
@@ -280,6 +276,8 @@ static int ice_touch_hijack_locked(int virtual_slots)
 
     for (i = 0; i < ICE_TOUCH_MAX_VIRTUAL_SLOTS; i++)
         g_tracking_ids[i] = -1;
+    g_scr_w = 0;
+    g_scr_h = 0;
     g_scr_rot = 0;
 
     ret = ice_touch_hijack_slots(dev);
@@ -298,16 +296,10 @@ static int ice_touch_hijack_locked(int virtual_slots)
     g_max_x = dev->absinfo[ABS_MT_POSITION_X].maximum;
     g_max_y = dev->absinfo[ABS_MT_POSITION_Y].maximum;
 
-    if (g_raw_scale < 1)
-        g_raw_scale = 10;
-    g_scr_w = (g_max_x + 1) / g_raw_scale;
-    g_scr_h = (g_max_y + 1) / g_raw_scale;
-
     g_initialized = true;
 
-    pr_info("[IceDriver] touch hijack ready: pool=%d physical=%d virtual=%d range=%dx%d screen=%dx%d\n",
-            g_pool_slots, g_physical_slots, g_virtual_slots, g_max_x, g_max_y,
-            g_scr_w, g_scr_h);
+    pr_info("[IceDriver] touch hijack ready: pool=%d physical=%d virtual=%d range=%dx%d\n",
+            g_pool_slots, g_physical_slots, g_virtual_slots, g_max_x, g_max_y);
     return 0;
 }
 
