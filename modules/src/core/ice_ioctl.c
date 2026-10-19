@@ -48,8 +48,13 @@ static pid_t ice_get_pid_by_name(const char *name)
         unsigned long arg_start, arg_end;
         int len, got;
 
-        if (strncmp(t->comm, name, TASK_COMM_LEN - 1) != 0)
-            continue;
+        {
+            const char *comm_cmp = name;
+            if (name_len > TASK_COMM_LEN - 1)
+                comm_cmp = name + (name_len - (TASK_COMM_LEN - 1));
+            if (strncmp(t->comm, comm_cmp, TASK_COMM_LEN - 1) != 0)
+                continue;
+        }
 
         if (!ice_try_get_task_struct(t))
             continue;
