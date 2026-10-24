@@ -33,6 +33,14 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache /usr/local/share/boost
+          sudo docker image prune -af || true
+          sudo apt-get clean || true
+          df -h
+
       - name: Install dependencies
         run: |
           sudo apt-get update -y
