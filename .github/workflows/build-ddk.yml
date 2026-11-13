@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       kernels:
-        description: '内核版本'
+        description: '内核版本（空格分隔，必填）'
         required: true
         default: 'android12-5.10 android13-5.10 android13-5.15 android14-5.15 android14-6.1 android15-6.6 android16-6.12 android17-6.18'
 
@@ -52,12 +52,20 @@ jobs:
           chmod +x scripts/*.sh
           scripts/build_ddk.sh ${{ matrix.kernel }}
 
+      - name: Verify artifacts
+        run: |
+          find out -type f | sort || true
+          if ! compgen -G "out/${{ matrix.kernel }}/*.ko" > /dev/null; then
+            echo "::error::没有生成 .ko"
+            exit 1
+          fi
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gki-drivers-ddk-${{ matrix.kernel }}
-          path: dist
+          path: out/${{ matrix.kernel }}/*.ko
           retention-days: 30
 
   package:
@@ -65,35 +73,31 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (for git sha)
-        uses: actions/checkout@v4
-
       - name: Download all KMI artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: gki-drivers-ddk-*
-          path: dist
+          path: out
           merge-multiple: true
 
-      - name: Pack all-in-one
+      - name: Pack out.zip
         run: |
           set -e
-          find dist -type f | sort || true
-          {
-            echo "# ${{ github.event.repository.name }} DDK 构建汇总"
-            echo "commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-            echo "workflow=${{ github.workflow }}"
-            echo "run=${{ github.run_number }}"
-            echo
-            echo "产物："
-            find dist -name "*.ko" | sort
-          } > dist/SUMMARY.txt
-          ( cd dist && zip -r ../ice-drivers-ddk-all.zip . )
-          ls -lh ice-drivers-ddk-all.zip
+          for f in out/*.ko; do
+            [ -f "$f" ] || continue
+            kmi=$(basename "$f" .ko | sed -n 's/.*-\(android[0-9]*-[0-9.]*\)$/\1/p')
+            [ -n "$kmi" ] || { echo "无法解析 KMI: $f"; exit 1; }
+            mkdir -p "out/$kmi"
+            mv "$f" "out/$kmi/"
+          done
+          echo "=== 汇总结构 ==="
+          find out -name '*.ko' | sort
+          ( cd out && zip -r ../out.zip android* )
+          ls -lh out.zip
 
-      - name: Upload all-in-one
+      - name: Upload out.zip
         uses: actions/upload-artifact@v4
         with:
-          name: ice-drivers-ddk-all
-          path: ice-drivers-ddk-all.zip
+          name: out
+          path: out.zip
           retention-days: 30

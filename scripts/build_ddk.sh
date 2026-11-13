@@ -13,8 +13,8 @@ else
     DRIVER_SRC="$REPO_ROOT/modules"
 fi
 
-DIST_ROOT="${GITHUB_WORKSPACE:+$GITHUB_WORKSPACE/dist}"
-DIST_ROOT="${DIST_ROOT:-$REPO_ROOT/dist}"
+DIST_ROOT="${GITHUB_WORKSPACE:+$GITHUB_WORKSPACE/out}"
+DIST_ROOT="${DIST_ROOT:-$REPO_ROOT/out}"
 
 GREEN='\e[32m'; RED='\e[31m'; YELLOW='\e[33m'; CYAN='\e[36m'; BLUE='\e[34m'; NC='\e[0m'
 declare -a BUILD_RESULTS=()
@@ -50,7 +50,7 @@ handle_output() {
     mod_name=$(basename "${source_ko%.ko}")
     local target_dir="$DIST_ROOT/$version"
     mkdir -p "$target_dir"
-    local target_ko="$target_dir/${mod_name}.ko"
+    local target_ko="$target_dir/${mod_name}-${version}.ko"
 
     cp -f "$source_ko" "$target_ko"
     rm -f "$source_ko"
@@ -62,7 +62,7 @@ handle_output() {
     fi
 
     BUILD_RESULTS+=("$version: 成功")
-    log_info "产物: dist/$version/${mod_name}.ko"
+    log_info "产物: out/$version/${mod_name}-${version}.ko"
 }
 
 build_one() {

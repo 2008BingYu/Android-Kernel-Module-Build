@@ -4,10 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       kernels:
-        description: '内核版本'
+        description: '内核版本（空格分隔，必填）'
         required: true
         default: 'android12-5.10 android13-5.10 android13-5.15 android14-5.15 android14-6.1 android15-6.6 android16-6.12 android17-6.18'
-
 
 jobs:
   prepare:
@@ -35,7 +34,7 @@ jobs:
   build:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -60,7 +59,6 @@ jobs:
             build-essential gcc gcc-aarch64-linux-gnu \
             bc bison flex libssl-dev libelf-dev \
             rsync zip git curl python3
-          sudo apt-get install -y --reinstall libyaml-0-2 libyaml-dev
 
       - name: Install repo tool
         run: |
@@ -79,7 +77,6 @@ jobs:
           mkdir -p kernels
           cd kernels
           v="${{ matrix.kernel }}"
-          echo "拉取内核: $v"
           mkdir -p "$v" && cd "$v"
           repo init -u https://android.googlesource.com/kernel/manifest \
             -b "common-$v" --depth=1
@@ -93,21 +90,18 @@ jobs:
 
       - name: Verify artifacts
         run: |
-          echo "产物列表:"
-          find dist -type f 2>/dev/null | sort || true
-          if ! compgen -G "dist/*/*.ko" > /dev/null; then
-            echo "::error::没有生成任何 .ko"
+          find out -type f | sort || true
+          if ! compgen -G "out/${{ matrix.kernel }}/*.ko" > /dev/null; then
+            echo "::error::没有生成 .ko"
             exit 1
           fi
-          echo "--- 产物 ---"
-          find dist -name "*.ko" | sort
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gki-drivers-fast-${{ matrix.kernel }}
-          path: dist
+          path: out/${{ matrix.kernel }}/*.ko
           retention-days: 30
 
   package:
@@ -115,37 +109,31 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (for git sha)
-        uses: actions/checkout@v4
-
       - name: Download all KMI artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: gki-drivers-fast-*
-          path: dist
+          path: out
           merge-multiple: true
 
-      - name: Pack all-in-one
+      - name: Pack out.zip
         run: |
           set -e
-          echo "=== 合并后的目录 ==="
-          find dist -type f | sort || true
-          {
-            echo "# ${{ github.event.repository.name }} 构建汇总"
-            echo "commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-            echo "workflow=${{ github.workflow }}"
-            echo "run=${{ github.run_number }}"
-            echo "script=build_fast_all.sh"
-            echo
-            echo "产物："
-            find dist -name "*.ko" | sort
-          } > dist/SUMMARY.txt
-          ( cd dist && zip -r ../ice-drivers-all.zip . )
-          ls -lh ice-drivers-all.zip
+          for f in out/*.ko; do
+            [ -f "$f" ] || continue
+            kmi=$(basename "$f" .ko | sed -n 's/.*-\(android[0-9]*-[0-9.]*\)$/\1/p')
+            [ -n "$kmi" ] || { echo "无法解析 KMI: $f"; exit 1; }
+            mkdir -p "out/$kmi"
+            mv "$f" "out/$kmi/"
+          done
+          echo "=== 汇总结构 ==="
+          find out -name '*.ko' | sort
+          ( cd out && zip -r ../out.zip android* )
+          ls -lh out.zip
 
-      - name: Upload all-in-one
+      - name: Upload out.zip
         uses: actions/upload-artifact@v4
         with:
-          name: ice-drivers-all
-          path: ice-drivers-all.zip
+          name: out
+          path: out.zip
           retention-days: 30
