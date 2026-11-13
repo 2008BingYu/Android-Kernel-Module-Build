@@ -1,0 +1,490 @@
+#!/bin/bash
+
+set -euo pipefail
+
+BUILD_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname -- "$BUILD_ROOT")"
+
+if [[ -n "${GITHUB_WORKSPACE:-}" ]]; then
+    KERNELS_ROOT="$GITHUB_WORKSPACE/kernels"
+    DRIVER_SRC="$GITHUB_WORKSPACE/modules"
+else
+    KERNELS_ROOT="$REPO_ROOT/android-kernel"
+    DRIVER_SRC="$REPO_ROOT/modules"
+fi
+
+DIST_ROOT="${GITHUB_WORKSPACE:+$GITHUB_WORKSPACE/dist}"
+DIST_ROOT="${DIST_ROOT:-$REPO_ROOT/dist}"
+
+GREEN='\e[32m'
+RED='\e[31m'
+YELLOW='\e[33m'
+BLUE='\e[34m'
+CYAN='\e[36m'
+NC='\e[0m'
+
+declare -a BUILD_RESULTS=()
+
+log_info()  { echo -e "  ${GREEN}✔${NC} $*"; }
+log_warn()  { echo -e "  ${YELLOW}⚠${NC} $*"; }
+log_error() { echo -e "  ${RED}✘${NC} $*"; }
+log_step()  { echo -e "\n${CYAN}[$1]${NC} $2"; }
+log_title() { echo -e "\n${BLUE}============================================================${NC}"; }
+
+contains_version() {
+    local version="$1"; shift
+    local item
+    for item in "$@"; do
+        [[ "$version" == "$item" ]] && return 0
+    done
+    return 1
+}
+
+find_clang_for_kernel() {
+    local kernel_dir="$1"
+
+    local declared_ver=""
+    local declared_bin=""
+
+    for cfg in \
+        "$kernel_dir/common/build.config.common" \
+        "$kernel_dir/common/build.config.gki.aarch64" \
+        "$kernel_dir/build.config.common" \
+        "$kernel_dir/build.config.gki.aarch64"; do
+        [[ -f "$cfg" ]] || continue
+
+        local cfg_vars
+        cfg_vars=$(
+            cd "$kernel_dir" 2>/dev/null || cd /
+            env -i \
+                PATH="$PATH" \
+                ROOT_DIR="$kernel_dir" \
+                KERNEL_DIR="common" \
+                bash -c "
+                    set +u +e
+                    source '$cfg' >/dev/null 2>&1 || true
+                    echo \"CLANG_VERSION=\${CLANG_VERSION:-}\"
+                    echo \"CLANG_PREBUILT_BIN=\${CLANG_PREBUILT_BIN:-}\"
+                "
+        )
+
+        local v b
+        v=$(echo "$cfg_vars" | grep '^CLANG_VERSION=' | cut -d= -f2-)
+        b=$(echo "$cfg_vars" | grep '^CLANG_PREBUILT_BIN=' | cut -d= -f2-)
+
+        [[ -n "$v" ]] && declared_ver="$v"
+        [[ -n "$b" ]] && declared_bin="$b"
+        [[ -n "$declared_ver" || -n "$declared_bin" ]] && break
+    done
+
+    if [[ -z "$declared_ver" && -z "$declared_bin" ]]; then
+        for scl in \
+            "$kernel_dir/bazel/constants.scl" \
+            "$kernel_dir/common/bazel/constants.scl"; do
+            [[ -f "$scl" ]] || continue
+
+            local scl_ver
+            scl_ver=$(grep -E '^[[:space:]]*CLANG_VERSION[[:space:]]*=' "$scl" 2>/dev/null \
+                      | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d ' ')
+            if [[ -n "$scl_ver" ]]; then
+                declared_ver="$scl_ver"
+                break
+            fi
+        done
+    fi
+
+    if [[ -n "$declared_bin" ]]; then
+        declared_bin="${declared_bin%/bin}"
+        local clang_path
+        if [[ "$declared_bin" == /* ]]; then
+            clang_path="$declared_bin"
+        else
+            clang_path="$kernel_dir/$declared_bin"
+        fi
+        if [[ -x "$clang_path/bin/clang" ]]; then
+            echo "$clang_path"; return 0
+        fi
+    fi
+
+    local clang_bases=(
+        "$kernel_dir/prebuilts-master/clang/host/linux-x86"
+        "$kernel_dir/prebuilts/clang/host/linux-x86"
+    )
+    for clang_base in "${clang_bases[@]}"; do
+        [[ -d "$clang_base" ]] || continue
+        if [[ -n "$declared_ver" && -x "$clang_base/clang-$declared_ver/bin/clang" ]]; then
+            echo "$clang_base/clang-$declared_ver"; return 0
+        fi
+        if [[ -n "$declared_ver" && -x "$clang_base/$declared_ver/bin/clang" ]]; then
+            echo "$clang_base/$declared_ver"; return 0
+        fi
+    done
+
+    return 1
+}
+
+fix_empty_ext_modversions() {
+    local found=0
+    for mod_c in "$DRIVER_SRC"/*.mod.c; do
+        [[ -f "$mod_c" ]] || continue
+        if grep -q '__section("__version_ext_names")' "$mod_c" && \
+           grep -q '^[[:space:]]*;[[:space:]]*$' "$mod_c"; then
+            perl -0pi -e 's/(__used __section\("__version_ext_names"\) =\n);/$1"";/' "$mod_c"
+            found=1
+        fi
+    done
+    return $((1 - found))
+}
+
+clean_driver_build() {
+    [[ -d "$DRIVER_SRC" ]] || return 0
+    find "$DRIVER_SRC" -type f \( \
+        -name '*.o' -o -name '*.o.d' -o -name '*.mod' -o -name '*.mod.c' -o \
+        -name '*.order' -o -name '*.symvers' -o -name '*.cmd' -o -name '*.usyms' -o \
+        -name '*.lds' -o -name '*.mod.o' -o -name '*.lto.o' -o -name '*.ko.lds' \
+    \) -delete 2>/dev/null || true
+    find "$DRIVER_SRC" -type d -name '.tmp_versions' -prune -exec rm -rf -- {} + 2>/dev/null || true
+}
+
+cleanup_driver_build_on_exit() {
+    local status=$?
+    trap - EXIT
+    clean_driver_build || true
+    exit "$status"
+}
+
+handle_output() {
+    local version="$1"
+
+    local source_ko
+    source_ko=$(find "$DRIVER_SRC" -maxdepth 1 -name "*.ko" | head -n 1)
+
+    if [[ -z "$source_ko" || ! -f "$source_ko" ]]; then
+        log_error "编译失败: 未找到 .ko"
+        BUILD_RESULTS+=("$version: 编译失败")
+        return 1
+    fi
+
+    local mod_name
+    mod_name=$(basename "${source_ko%.ko}")
+
+    local git_sha
+    git_sha=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo nogit)
+
+    local target_dir="$DIST_ROOT/$version"
+    mkdir -p "$target_dir"
+
+    local base_name="${mod_name}-${version}-${git_sha}"
+    local target_ko="$target_dir/${base_name}.ko"
+
+    cp -f "$source_ko" "$target_ko"
+    rm -f "$source_ko"
+
+    if command -v aarch64-linux-gnu-strip >/dev/null 2>&1; then
+        aarch64-linux-gnu-strip --strip-debug "$target_ko" || true
+    else
+        strip --strip-debug "$target_ko" 2>/dev/null || true
+    fi
+
+    ( cd "$target_dir" && sha256sum "${base_name}.ko" >"${base_name}.ko.sha256" )
+
+    local vermagic="unknown"
+    if command -v modinfo >/dev/null 2>&1; then
+        vermagic=$(modinfo -F vermagic "$target_ko" 2>/dev/null || true)
+    fi
+    [[ -n "$vermagic" ]] || vermagic=$(strings "$target_ko" 2>/dev/null | grep -m1 '^vermagic=' || echo unknown)
+
+    {
+        echo "version=$version"
+        echo "file=${base_name}.ko"
+        echo "git_sha=$git_sha"
+        echo "size=$(stat -c%s "$target_ko" 2>/dev/null || echo 0)"
+        echo "vermagic=$vermagic"
+        echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } >"$target_dir/build-info.txt"
+
+    BUILD_RESULTS+=("$version: 成功")
+    log_info "产物: dist/$version/${base_name}.ko"
+    log_info "vermagic: $vermagic"
+}
+
+# ======================== Bazel 构建 =========================
+build_kernel() {
+    local version="$1"
+    local clang_path="$2"
+    local cross_prefix="$3"
+    local extra_params="${4:-}"
+    local kernel_dir="$KERNELS_ROOT/$version"
+
+    log_title
+    log_step "$version" "编译中 (Bazel)"
+    log_info "使用 Clang: $clang_path"
+
+    if [[ ! -d "$kernel_dir" ]]; then
+        log_error "内核目录不存在: $kernel_dir"
+        BUILD_RESULTS+=("$version: 目录不存在")
+        return
+    fi
+
+    clean_driver_build
+    cd "$kernel_dir" || return
+
+    local bazel_out
+    bazel_out=$(readlink -f bazel-bin/common/kernel_aarch64 2>/dev/null || true)
+
+    if [[ -z "$bazel_out" || ! -d "$bazel_out" ]]; then
+        log_warn "未检测到内核产物，开始 Bazel 构建"
+        if ! tools/bazel build //common:kernel_aarch64 //common:kernel_aarch64_modules_prepare; then
+            log_error "Bazel 构建失败"
+            BUILD_RESULTS+=("$version: Bazel 构建失败")
+            return
+        fi
+        bazel_out=$(readlink -f bazel-bin/common/kernel_aarch64)
+    fi
+
+    cd "$bazel_out" || return
+    if [[ -f "../kernel_aarch64_modules_prepare/modules_prepare_outdir.tar.gz" ]]; then
+        tar -xzf ../kernel_aarch64_modules_prepare/modules_prepare_outdir.tar.gz || true
+    fi
+
+    cd "$kernel_dir" || return
+
+    log_step "$version" "编译驱动模块"
+    local symvers_file="$bazel_out/Module.symvers"
+    local symvers_backup=""
+    local modpost_warn_param="KBUILD_MODPOST_WARN=1 CONFIG_EXTENDED_MODVERSIONS=n"
+    if [[ -f "$symvers_file" ]]; then
+        log_warn "临时移走 Module.symvers：跳过 CRC 校验，模块可能无法在开启 MODVERSIONS 的内核加载"
+        symvers_backup="$symvers_file.no_crc_bak.$$"
+        mv "$symvers_file" "$symvers_backup"
+    fi
+
+    set +e
+    env PATH="$clang_path/bin:$PATH" \
+        make -C "$kernel_dir/common" \
+            O="$bazel_out" \
+            M="$DRIVER_SRC" \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CONFIG_DEBUG_INFO_BTF_MODULES= \
+            CROSS_COMPILE="$cross_prefix" \
+            $extra_params $modpost_warn_param \
+            modules -j"$(nproc)"
+    local make_status=$?
+
+    if [[ $make_status -ne 0 ]] && fix_empty_ext_modversions; then
+        log_warn "检测到空 __version_ext_names，修补后重试"
+        env PATH="$clang_path/bin:$PATH" \
+            make -C "$kernel_dir/common" \
+                O="$bazel_out" \
+                M="$DRIVER_SRC" \
+                ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+                CONFIG_DEBUG_INFO_BTF_MODULES= \
+                CROSS_COMPILE="$cross_prefix" \
+                $extra_params $modpost_warn_param \
+                modules -j"$(nproc)"
+        make_status=$?
+    fi
+    if [[ -n "$symvers_backup" ]]; then mv "$symvers_backup" "$symvers_file"; fi
+    set -e
+
+    if [[ $make_status -ne 0 ]]; then
+        log_error "编译失败"
+        BUILD_RESULTS+=("$version: 编译失败")
+        clean_driver_build
+        return
+    fi
+
+    handle_output "$version"
+    clean_driver_build
+}
+
+# ======================== Legacy 构建 ========================
+build_legacy_kernel() {
+    local version="$1"
+    local kernel_dir="$KERNELS_ROOT/$version"
+
+    log_title
+    log_step "$version" "编译中 (Legacy)"
+
+    if [[ ! -d "$kernel_dir" ]]; then
+        log_error "内核目录不存在: $kernel_dir"
+        BUILD_RESULTS+=("$version: 目录不存在")
+        return
+    fi
+
+    clean_driver_build
+    cd "$kernel_dir" || return
+
+    local common_out_dir="$(pwd)/out/$version/common"
+    local kernel_build_dir="$common_out_dir/common"
+    local kernel_config="$kernel_build_dir/.config"
+    local kernel_src="$kernel_dir/common"
+
+    local legacy_clang
+    legacy_clang=$(find_clang_for_kernel "$kernel_dir")
+
+    if [[ -z "$legacy_clang" || ! -x "$legacy_clang/bin/clang" ]]; then
+        log_error "找不到 Clang"
+        BUILD_RESULTS+=("$version: Clang 不存在")
+        return 1
+    fi
+
+    log_info "使用 Clang: $legacy_clang"
+
+    local build_tools="$kernel_dir/build/build-tools/path/linux-x86"
+    local FULL_PATH="$legacy_clang/bin:$build_tools:$PATH"
+
+    local HOST_CFLAGS="-I$kernel_dir/prebuilts/kernel-build-tools/linux-x86/include -I/usr/include"
+    local HOST_LDFLAGS="-L$kernel_dir/prebuilts/kernel-build-tools/linux-x86/lib64 -L/usr/lib/x86_64-linux-gnu -fuse-ld=lld --rtlib=compiler-rt"
+
+    if [[ ! -f "$kernel_config" ]]; then
+        log_warn "未找到内核配置，开始全量内核编译（耗时较长）"
+        if ! BUILD_CONFIG=common/build.config.gki.aarch64 OUT_DIR="$common_out_dir" build/build.sh; then
+            log_error "内核编译失败"
+            BUILD_RESULTS+=("$version: 内核编译失败")
+            return
+        fi
+    fi
+
+    log_step "$version" "准备模块构建环境"
+    if ! env PATH="$FULL_PATH" \
+        HOSTCFLAGS="$HOST_CFLAGS" \
+        HOSTLDFLAGS="$HOST_LDFLAGS" \
+    make -C "$kernel_src" O="$kernel_build_dir" \
+        ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+        CONFIG_DEBUG_INFO_BTF_MODULES= \
+        CROSS_COMPILE=aarch64-linux-gnu- \
+        HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
+        modules_prepare; then
+        log_error "modules_prepare 失败"
+        BUILD_RESULTS+=("$version: modules_prepare 失败")
+        return
+    fi
+
+    log_step "$version" "编译驱动模块"
+    local symvers_file="$kernel_build_dir/Module.symvers"
+    local symvers_backup=""
+    local modpost_warn_param="KBUILD_MODPOST_WARN=1 CONFIG_EXTENDED_MODVERSIONS=n"
+    if [[ -f "$symvers_file" ]]; then
+        log_warn "临时移走 Module.symvers：跳过 CRC 校验，模块可能无法在开启 MODVERSIONS 的内核加载"
+        symvers_backup="$symvers_file.no_crc_bak.$$"
+        mv "$symvers_file" "$symvers_backup"
+    fi
+
+    set +e
+    env PATH="$FULL_PATH" \
+        HOSTCFLAGS="$HOST_CFLAGS" \
+        HOSTLDFLAGS="$HOST_LDFLAGS" \
+    make -C "$kernel_src" O="$kernel_build_dir" \
+        M="$DRIVER_SRC" \
+        ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+        CROSS_COMPILE=aarch64-linux-gnu- \
+        HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
+        $modpost_warn_param \
+        modules -j"$(nproc)"
+    local make_status=$?
+
+    if [[ $make_status -ne 0 ]] && fix_empty_ext_modversions; then
+        log_warn "检测到空 __version_ext_names，修补后重试"
+        env PATH="$FULL_PATH" \
+            HOSTCFLAGS="$HOST_CFLAGS" \
+            HOSTLDFLAGS="$HOST_LDFLAGS" \
+        make -C "$kernel_src" O="$kernel_build_dir" \
+            M="$DRIVER_SRC" \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CONFIG_DEBUG_INFO_BTF_MODULES= \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
+            $modpost_warn_param \
+            modules -j"$(nproc)"
+        make_status=$?
+    fi
+    if [[ -n "$symvers_backup" ]]; then mv "$symvers_backup" "$symvers_file"; fi
+    set -e
+
+    if [[ $make_status -ne 0 ]]; then
+        log_error "编译失败"
+        BUILD_RESULTS+=("$version: 编译失败")
+        clean_driver_build
+        return
+    fi
+
+    handle_output "$version"
+    clean_driver_build
+}
+
+main() {
+    trap cleanup_driver_build_on_exit EXIT
+
+    local requested_versions=("$@")
+
+    if [[ -d "$DIST_ROOT" ]]; then
+        rm -rf "$DIST_ROOT"
+    fi
+    rm -f "$DRIVER_SRC"/*.ko
+
+    local all_kernels=()
+    while IFS= read -r -d '' dir; do
+        local name
+        name=$(basename "$dir")
+        if [[ "$name" =~ ^android.*-.* ]]; then
+            all_kernels+=("$name")
+        fi
+    done < <(find "$KERNELS_ROOT" -maxdepth 1 -mindepth 1 -type d -print0 2>/dev/null | sort -z)
+
+    if [[ ${#all_kernels[@]} -eq 0 ]]; then
+        log_error "未在 $KERNELS_ROOT 下发现内核目录"
+        exit 1
+    fi
+
+    log_title
+    for k in "${all_kernels[@]}"; do
+        echo -e "  ${GREEN}•${NC} $k"
+    done
+
+    should_build() {
+        [[ ${#requested_versions[@]} -eq 0 ]] || contains_version "$1" "${requested_versions[@]}"
+    }
+
+    for version in "${all_kernels[@]}"; do
+        should_build "$version" || continue
+
+        local kernel_dir="$KERNELS_ROOT/$version"
+
+        if [[ -d "$kernel_dir/bazel-bin" ]] || [[ -f "$kernel_dir/tools/bazel" ]]; then
+            local clang_path
+            clang_path=$(find_clang_for_kernel "$kernel_dir")
+            if [[ -z "$clang_path" || ! -x "$clang_path/bin/clang" ]]; then
+                log_error "$version 找不到 Clang，跳过"
+                BUILD_RESULTS+=("$version: 缺少 Clang")
+                continue
+            fi
+            build_kernel "$version" "$clang_path" "aarch64-linux-gnu-" "CLANG_TRIPLE=aarch64-linux-gnu-" || true
+        else
+            build_legacy_kernel "$version" || true
+        fi
+    done
+
+    log_title
+    for result in "${BUILD_RESULTS[@]}"; do
+        echo -e "  $result"
+    done
+    log_title
+    echo ""
+    find "$DIST_ROOT" -type f -name "*.ko" 2>/dev/null | sort | while read -r f; do
+        echo -e "  ${GREEN}✔${NC} ${f#$DIST_ROOT/}"
+    done
+    local failed=0 total=0
+    for r in "${BUILD_RESULTS[@]}"; do
+        total=$((total + 1))
+        [[ "$r" == *成功* ]] || failed=$((failed + 1))
+    done
+    echo ""
+    log_title
+    log_info "汇总: 共 $total 个，成功 $((total - failed)) 个，失败 $failed 个"
+    [[ $failed -eq 0 ]]
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

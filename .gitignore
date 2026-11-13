@@ -1,0 +1,9 @@
+dist/
+kernels/
+*.ko
+*.o
+*.mod
+*.mod.c
+*.cmd
+*.symvers
+*.order

@@ -1,0 +1,103 @@
+name: Build Drivers (DDK)
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernels:
+        description: '内核版本（空格分隔，必填）'
+        required: true
+        default: 'android12-5.10 android13-5.10 android13-5.15 android14-5.15 android14-6.1 android15-6.6 android16-6.12 android17-6.18'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - name: Build matrix
+        id: set
+        run: |
+          K="$(echo "${{ github.event.inputs.kernels }}" | tr -s ' ')"
+          if [ -z "${K// /}" ]; then
+            echo "::error::kernels 不能为空"
+            exit 1
+          fi
+          echo "内核列表: $K"
+          JSON="["
+          for v in $K; do
+            [ "$JSON" = "[" ] || JSON="$JSON,"
+            JSON="$JSON\"$v\""
+          done
+          JSON="$JSON]"
+          echo "matrix=$JSON" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    container:
+      image: ghcr.io/ylarod/ddk-min:${{ matrix.kernel }}
+      options: --privileged
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Build driver with DDK
+        run: |
+          chmod +x scripts/*.sh
+          scripts/build_ddk.sh ${{ matrix.kernel }}
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gki-drivers-ddk-${{ matrix.kernel }}
+          path: dist
+          retention-days: 30
+
+  package:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for git sha)
+        uses: actions/checkout@v4
+
+      - name: Download all KMI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gki-drivers-ddk-*
+          path: dist
+          merge-multiple: true
+
+      - name: Pack all-in-one
+        run: |
+          set -e
+          find dist -type f | sort || true
+          {
+            echo "# ${{ github.event.repository.name }} DDK 构建汇总"
+            echo "commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+            echo "workflow=${{ github.workflow }}"
+            echo "run=${{ github.run_number }}"
+            echo
+            for i in dist/*/build-info.txt; do
+              [ -f "$i" ] || continue
+              echo "## $i"
+              cat "$i"
+              echo
+            done
+          } > dist/SUMMARY.txt
+          ( cd dist && zip -r ../ice-drivers-ddk-all.zip . )
+          ls -lh ice-drivers-ddk-all.zip
+
+      - name: Upload all-in-one
+        uses: actions/upload-artifact@v4
+        with:
+          name: ice-drivers-ddk-all
+          path: ice-drivers-ddk-all.zip
+          retention-days: 30
