@@ -96,11 +96,17 @@ jobs:
             exit 1
           fi
 
+      - name: Compute artifact name
+        id: art
+        run: |
+          ko=$(ls out/${{ matrix.kernel }}/*.ko | head -1)
+          echo "name=$(basename "$ko" .ko)" >> "$GITHUB_OUTPUT"
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gki-drivers-fast-${{ matrix.kernel }}
+          name: ${{ steps.art.outputs.name }}
           path: out/${{ matrix.kernel }}/*.ko
           retention-days: 30
 
@@ -112,7 +118,7 @@ jobs:
       - name: Download all KMI artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: gki-drivers-fast-*
+          pattern: '*-android*'
           path: out
           merge-multiple: true
 
