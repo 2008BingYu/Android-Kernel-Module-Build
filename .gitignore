@@ -7,3 +7,4 @@ kernels/
 *.cmd
 *.symvers
 *.order
+keys/

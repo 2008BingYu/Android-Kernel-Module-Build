@@ -13,8 +13,7 @@
 #include "ice_device.h"
 #include "ice_mem.h"
 #include "ice_touch.h"
-
-static const char g_secret_key[] = "IceDriver2026";
+#include "ice_ticket.h"
 
 static ICE_FILE_CTX *ice_get_ctx(struct file *filep)
 {
@@ -120,13 +119,13 @@ long ice_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
                            sizeof(user_key) - 1))
             return -EFAULT;
 
-        if (strcmp(user_key, g_secret_key) == 0) {
+        if (ice_ticket_verify(user_key, sizeof(user_key)) == 0) {
             ctx->authorized = true;
             pr_info("[IceDriver] fd %p authorized\n", filep);
             return 0;
         }
 
-        pr_warn("[IceDriver] bad key\n");
+        pr_warn("[IceDriver] bad ticket\n");
         return -EACCES;
 
     case OP_GET_PID:
