@@ -138,14 +138,10 @@ handle_output() {
     local mod_name
     mod_name=$(basename "${source_ko%.ko}")
 
-    local git_sha
-    git_sha=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo nogit)
-
     local target_dir="$DIST_ROOT/$version"
     mkdir -p "$target_dir"
 
-    local base_name="${mod_name}-${version}-${git_sha}"
-    local target_ko="$target_dir/${base_name}.ko"
+    local target_ko="$target_dir/${mod_name}.ko"
 
     cp -f "$source_ko" "$target_ko"
     rm -f "$source_ko"
@@ -156,28 +152,9 @@ handle_output() {
         strip --strip-debug "$target_ko" 2>/dev/null || true
     fi
 
-    ( cd "$target_dir" && sha256sum "${base_name}.ko" >"${base_name}.ko.sha256" )
-
-    local vermagic="unknown"
-    if command -v modinfo >/dev/null 2>&1; then
-        vermagic=$(modinfo -F vermagic "$target_ko" 2>/dev/null || true)
-    fi
-    [[ -n "$vermagic" ]] || vermagic=$(strings "$target_ko" 2>/dev/null | grep -m1 '^vermagic=' || echo unknown)
-
-    {
-        echo "version=$version"
-        echo "file=${base_name}.ko"
-        echo "git_sha=$git_sha"
-        echo "size=$(stat -c%s "$target_ko" 2>/dev/null || echo 0)"
-        echo "vermagic=$vermagic"
-        echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    } >"$target_dir/build-info.txt"
-
     BUILD_RESULTS+=("$version: 成功")
-    log_info "产物: dist/$version/${base_name}.ko"
-    log_info "vermagic: $vermagic"
+    log_info "产物: dist/$version/${mod_name}.ko"
 }
-
 
 compile_module() {
     local version="$1" kernel_dir="$2" out_dir="$3"
@@ -213,7 +190,6 @@ compile_module() {
     fi
     if [[ -n "$symvers_backup" ]]; then mv "$symvers_backup" "$symvers_file"; fi
     set -e
-
 
     return $st
 }

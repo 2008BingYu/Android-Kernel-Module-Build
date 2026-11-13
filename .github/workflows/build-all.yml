@@ -99,12 +99,8 @@ jobs:
             echo "::error::没有生成任何 .ko"
             exit 1
           fi
-          echo "--- build-info ---"
-          for i in dist/*/build-info.txt; do
-            [ -f "$i" ] && { echo "## $i"; cat "$i"; }
-          done
-          echo "--- sha256 ---"
-          find dist -name "*.sha256" -exec cat {} \;
+          echo "--- 产物 ---"
+          find dist -name "*.ko" | sort
 
       - name: Upload artifacts
         if: always()
@@ -141,12 +137,8 @@ jobs:
             echo "run=${{ github.run_number }}"
             echo "script=build_all.sh"
             echo
-            for i in dist/*/build-info.txt; do
-              [ -f "$i" ] || continue
-              echo "## $i"
-              cat "$i"
-              echo
-            done
+            echo "产物："
+            find dist -name "*.ko" | sort
           } > dist/SUMMARY.txt
           ( cd dist && zip -r ../ice-drivers-all.zip . )
           ls -lh ice-drivers-all.zip
