@@ -4,8 +4,6 @@ IceDriver-y := \
     src/core/ice_main.o \
     src/core/ice_ioctl.o \
     src/core/ice_sym.o \
-    src/core/ice_ticket.o \
-    src/core/ed25519_verify.o \
     src/mem/ice_mem.o \
     src/mem/ice_module.o \
     src/input/ice_touch.o
