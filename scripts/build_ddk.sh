@@ -1,11 +1,5 @@
 #!/bin/bash
-# DDK 模式编译：用 $KDIR（DDK 容器里预置，或本地内核树）编译树外模块
-# 用法:
-#   build_ddk.sh [kmi...]      # 不填则用 $KERNELS，再不行扫描 $KERNELS_ROOT
-#
-# 云编译：KSU/DDK 容器里 KDIR 已就绪，workflow 传一个 kmi 调用
-# 本地编译：设 KERNELS_ROOT（默认 ./android-kernel），每个版本一个子目录，
-#           也可用 KDIR 直接指定单版本内核构建目录
+
 set -euo pipefail
 
 BUILD_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -143,7 +137,6 @@ main() {
         read -r -a requested <<<"$KERNELS"
     fi
 
-    # 云端只有一个 KDIR，直接用
     if [[ -n "${KDIR:-}" && -d "${KDIR:-}" ]]; then
         if [[ ${#requested[@]} -eq 0 ]]; then
             log_error "缺少版本参数（例如 build_ddk.sh android14-6.1）"
@@ -153,7 +146,6 @@ main() {
             build_one "$v" "$KDIR" || true
         done
     else
-        # 本地：每个版本一个子目录
         if [[ ${#requested[@]} -eq 0 ]]; then
             mapfile -t requested < <(find "$KERNELS_ROOT" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
         fi
